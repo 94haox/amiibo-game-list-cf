@@ -1,0 +1,75 @@
+name = "amiibo-game-list"
+main = "src/index.ts"
+compatibility_date = "2025-05-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Weekly cron — Mondays at 04:00 UTC. Adjust as needed.
+[triggers]
+crons = ["0 4 * * 1"]
+
+# ------------------------------------------------------------------
+# Bindings — fill ids after creating resources with `wrangler`.
+# ------------------------------------------------------------------
+
+[[r2_buckets]]
+binding = "OUTPUT_BUCKET"
+bucket_name = "amiibo-game-list"
+# Create: wrangler r2 bucket create amiibo-game-list
+
+[[kv_namespaces]]
+binding = "PARTIALS"
+id = "REPLACE_WITH_KV_ID"
+# Create: wrangler kv namespace create PARTIALS
+
+[[queues.producers]]
+binding = "JOBS_QUEUE"
+queue = "amiibo-jobs"
+# Create: wrangler queues create amiibo-jobs
+
+[[queues.producers]]
+binding = "FINALIZE_QUEUE"
+queue = "amiibo-finalize"
+# Create: wrangler queues create amiibo-finalize
+
+[[queues.consumers]]
+queue = "amiibo-jobs"
+max_batch_size = 10
+max_batch_timeout = 30
+max_retries = 5
+dead_letter_queue = "amiibo-jobs-dlq"
+
+[[queues.consumers]]
+queue = "amiibo-finalize"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 3
+
+[[durable_objects.bindings]]
+name = "COORDINATOR"
+class_name = "RunCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RunCoordinator"]
+
+# ------------------------------------------------------------------
+# Public vars (non-secret). Override per-environment as needed.
+# ------------------------------------------------------------------
+
+[vars]
+ENABLE_GITHUB_COMMIT = "false"
+GITHUB_OWNER = ""
+GITHUB_REPO = ""
+GITHUB_BRANCH = "main"
+GITHUB_PATH = "games_info.json"
+GITHUB_COMMIT_MESSAGE = "chore: refresh games_info.json"
+GITHUB_COMMITTER_NAME = "amiibo-game-list-bot"
+GITHUB_COMMITTER_EMAIL = "bot@example.invalid"
+PARALLELISM = "8"
+
+# ------------------------------------------------------------------
+# Secrets — set with `wrangler secret put <name>`.
+# ------------------------------------------------------------------
+#   GITHUB_TOKEN          PAT (contents:write) for the target repo
+#   INTERNAL_TRIGGER_KEY  shared secret for manual /trigger calls
+# ------------------------------------------------------------------
