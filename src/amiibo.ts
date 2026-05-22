@@ -14,10 +14,23 @@ export interface AmiiboContext {
   database: AmiiboDatabaseRaw;
 }
 
-/** Replicates DBAmiibo.Name — strips punctuation/specials for URL building. */
-export function cleanedName(originalName: string): string {
-  let name = originalName;
-  switch (originalName) {
+/** Replicates DBAmiibo.Name — strips punctuation/specials for URL building.
+ *
+ * `series` is optional but, when provided, lets us drop the " - SeriesName"
+ * disambiguation suffix that some DB entries carry (e.g.
+ * "Luigi - My Mario Wooden Blocks" → "Luigi"). amiibo.life's slug only uses
+ * the character portion, so without this the URL would 404.
+ */
+export function cleanedName(originalName: string, series?: string): string {
+  let input = originalName;
+  if (series) {
+    const suffix = ` - ${series}`;
+    if (input.endsWith(suffix)) {
+      input = input.slice(0, -suffix.length);
+    }
+  }
+  let name = input;
+  switch (input) {
     case "8-Bit Link":
       name = "Link The Legend of Zelda";
       break;
@@ -159,7 +172,7 @@ async function resolveAnimalCrossingCardUrl(character: string): Promise<string> 
 export async function buildAmiiboUrl(ctx: AmiiboContext): Promise<string> {
   const series = amiiboSeries(ctx);
   const type = amiiboType(ctx);
-  const name = cleanedName(ctx.originalName);
+  const name = cleanedName(ctx.originalName, series);
 
   if (type === "Card" && series === "Animal Crossing") {
     return resolveAnimalCrossingCardUrl(characterName(ctx));
@@ -179,7 +192,11 @@ export async function buildAmiiboUrl(ctx: AmiiboContext): Promise<string> {
   }
 
   if (seriesSlug === "street-fighter-6") {
-    seriesSlug = "street-fighter-6-starter-set";
+    // The booster-pack series page on amiibo.life is a superset of the
+    // starter-set: it includes Year 2 fighters (M. Bison, Mai, Terry, Sagat,
+    // Elena, C. Viper, Alex, Ingrid) and "alt" variants. The C# generator
+    // used "-starter-set" before those releases existed.
+    seriesSlug = "street-fighter-6-booster-pack";
   }
 
   let url = `https://amiibo.life/amiibo/${seriesSlug}/${name.replace(/ /g, "-").toLowerCase()}`;
