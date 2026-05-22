@@ -30,11 +30,13 @@ export function characterKey(id: string): string {
 }
 
 export function amiiboSeriesKey(id: string): string {
-  // C#: ID.Substring(14, 2)
-  return `0x${normalizeHex(id).slice(16, 18).toLowerCase()}`;
+  // C#: ID.Substring(14, 2). normalizeHex prefixes "0x" so the JS slice
+  // start is the same number — Substring(14, 2) over an 18-char string
+  // ("0x" + 16 hex) is indices 14..15.
+  return `0x${normalizeHex(id).slice(14, 16).toLowerCase()}`;
 }
 
 export function typeKey(id: string): string {
   // C#: ID.Substring(8, 2)
-  return `0x${normalizeHex(id).slice(10, 12).toLowerCase()}`;
+  return `0x${normalizeHex(id).slice(8, 10).toLowerCase()}`;
 }

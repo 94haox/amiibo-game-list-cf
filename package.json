@@ -10,7 +10,9 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "trigger": "wrangler triggers deploy",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "generate": "tsx src/cli.ts",
+    "generate:smoke": "tsx src/cli.ts --limit 10 --log verbose"
   },
   "dependencies": {
     "fast-xml-parser": "^4.5.0",
@@ -18,6 +20,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250515.0",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.2",
     "typescript": "^5.5.4",
     "wrangler": "^3.85.0"
   }

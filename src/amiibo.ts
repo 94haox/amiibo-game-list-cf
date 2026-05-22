@@ -1,10 +1,11 @@
 // Port of DBAmiibo — wraps a raw amiibo DB entry and computes derived fields
 // (cleaned-up name, amiibo.life URL, character name, series, type).
 
+import { parse } from "node-html-parser";
+
 import { NotFoundError, fetchTextWithRetry } from "./fetch-retry.js";
 import { log } from "./log.js";
 import { amiiboSeriesKey, characterKey, normalizeHex, typeKey } from "./hex.js";
-import { htmlDecode } from "./text.js";
 import type { AmiiboDatabaseRaw } from "./types.js";
 
 export interface AmiiboContext {
@@ -134,13 +135,22 @@ async function resolveAnimalCrossingCardUrl(character: string): Promise<string> 
     throw err;
   }
 
-  // amiibo.life renders a grid: <ul class="figures-cards small-block-grid-2 ..."><li><a href="..."> ...
-  // We pick the first <a> whose href contains "cards".
-  const decoded = htmlDecode(html);
-  const matches = decoded.matchAll(/<li[^>]*>\s*<a[^>]*href="([^"]+)"/g);
-  for (const m of matches) {
-    const href = m[1] ?? "";
-    if (href.includes("cards")) return `https://amiibo.life${href}`;
+  // amiibo.life renders a grid:
+  //   <ul class="figures-cards small-block-grid-2 medium-block-grid-4 large-block-grid-4">
+  //     <li><a href="/amiibo/.../slug">…</a></li>
+  //     …
+  //   </ul>
+  // Scope to that ul and take the first card link.
+  const root = parse(html);
+  const list = root.querySelector(
+    "ul.figures-cards.small-block-grid-2.medium-block-grid-4.large-block-grid-4",
+  );
+  if (list) {
+    const anchors = list.querySelectorAll("li a[href]");
+    for (const a of anchors) {
+      const href = a.getAttribute("href") ?? "";
+      if (href.includes("cards")) return `https://amiibo.life${href}`;
+    }
   }
   return fallbackAnimalCrossingUrl(character);
 }

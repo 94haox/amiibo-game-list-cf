@@ -4,6 +4,24 @@
 
 import { log } from "./log.js";
 
+// amiibo.life is behind Cloudflare's bot management; requests without a
+// browser-like User-Agent get bounced to a JS challenge page. We send a
+// realistic UA on every outgoing fetch.
+const DEFAULT_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
+function withDefaultHeaders(init: RequestInit | undefined): RequestInit {
+  const headers = new Headers(init?.headers ?? undefined);
+  for (const [k, v] of Object.entries(DEFAULT_HEADERS)) {
+    if (!headers.has(k)) headers.set(k, v);
+  }
+  return { ...(init ?? {}), headers };
+}
+
 export class NotFoundError extends Error {
   readonly status = 404;
   constructor(public readonly url: string) {
@@ -43,7 +61,7 @@ export async function fetchTextWithRetry(
 
   for (let i = 0; i < attempts; i++) {
     try {
-      const response = await fetch(url, options.init);
+      const response = await fetch(url, withDefaultHeaders(options.init));
 
       if (response.status === 404) {
         // Consume body so the runtime doesn't warn about leaked streams.
@@ -98,7 +116,7 @@ export async function fetchBytesWithRetry(url: string, options: FetchRetryOption
 
   for (let i = 0; i < attempts; i++) {
     try {
-      const response = await fetch(url, options.init);
+      const response = await fetch(url, withDefaultHeaders(options.init));
       if (response.status === 404) {
         await response.body?.cancel();
         throw new NotFoundError(url);

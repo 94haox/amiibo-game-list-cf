@@ -1,0 +1,92 @@
+name: Generate games_info.json
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Limit number of amiibo to process (blank = all)"
+        required: false
+        default: ""
+        type: string
+      concurrency:
+        description: "Concurrent fetchers"
+        required: false
+        default: "8"
+        type: string
+      log_level:
+        description: "Log level"
+        required: false
+        default: "info"
+        type: choice
+        options:
+          - verbose
+          - info
+          - warn
+          - error
+  schedule:
+    # Mirror the cron in wrangler.toml — weekly, Monday 04:00 UTC.
+    - cron: "0 4 * * 1"
+
+jobs:
+  generate:
+    name: Run generator
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run generator
+        id: run
+        continue-on-error: true
+        run: |
+          set +e
+          ARGS="--output games_info.json --missing missing_games.json"
+          ARGS="$ARGS --concurrency ${{ inputs.concurrency || '8' }}"
+          ARGS="$ARGS --log ${{ inputs.log_level || 'info' }}"
+          if [ -n "${{ inputs.limit }}" ]; then
+            ARGS="$ARGS --limit ${{ inputs.limit }}"
+          fi
+          echo "Running: npm run generate -- $ARGS"
+          npm run --silent generate -- $ARGS
+          # Exit code 1 means "completed with missing titleids" — still upload artifacts.
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Show output stats
+        if: always()
+        run: |
+          if [ -f games_info.json ]; then
+            echo "games_info.json size: $(wc -c < games_info.json) bytes"
+            echo "amiibo count: $(jq '.amiibos | length' games_info.json)"
+          fi
+          if [ -f missing_games.json ]; then
+            echo "missing games:"
+            cat missing_games.json
+          fi
+
+      - name: Upload games_info.json
+        if: always() && hashFiles('games_info.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: games_info-${{ github.run_id }}
+          path: |
+            games_info.json
+            missing_games.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Fail if generator errored out
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '1'
+        run: |
+          echo "Generator exited with ${{ steps.run.outputs.exit_code }}"
+          exit 1

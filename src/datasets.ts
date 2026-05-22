@@ -58,11 +58,19 @@ export async function loadDSDatabase(): Promise<DSRelease[]> {
   // 3dsdb returns XML. Worker's fetch returns a stream — read bytes and parse.
   const bytes = await fetchBytesWithRetry(DSDB_URL);
   const xml = new TextDecoder("utf-8").decode(bytes);
-  const parser = new XMLParser({ ignoreAttributes: true, trimValues: true });
-  const parsed = parser.parse(xml) as { releases?: { release?: DSRelease | DSRelease[] } };
+  // textNodeName ensures empty <name/> elements coerce to "" instead of {}.
+  const parser = new XMLParser({ ignoreAttributes: true, trimValues: true, parseTagValue: false });
+  const parsed = parser.parse(xml) as { releases?: { release?: unknown } };
   const releases = parsed.releases?.release;
   if (!releases) return [];
-  return Array.isArray(releases) ? releases : [releases];
+  const list = Array.isArray(releases) ? releases : [releases];
+  return list
+    .filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null)
+    .map((r) => ({
+      name: typeof r.name === "string" ? r.name : "",
+      titleid: typeof r.titleid === "string" ? r.titleid : "",
+    }))
+    .filter((r) => r.name && r.titleid);
 }
 
 export function loadWiiUDataset(): WiiUGame[] {
