@@ -139,6 +139,8 @@ export interface RunOptions {
   concurrency?: number;
   /** Stop after the first N amiibo — meant for smoke tests, not production. */
   limit?: number | null;
+  /** Local amiibo.json path; bypasses the N3evin/AmiiboAPI HTTP fetch. */
+  amiiboDatabasePath?: string | null;
   onProgress?: (done: number, total: number, name: string) => void;
 }
 
@@ -146,7 +148,9 @@ export async function runFullGeneration(options: RunOptions = {}): Promise<RunRe
   const concurrency = options.concurrency ?? 8;
 
   log.info("Loading datasets…");
-  const datasets = await loadAllDatasets();
+  const datasets = await loadAllDatasets({
+    amiiboDatabasePath: options.amiiboDatabasePath ?? null,
+  });
   log.info(
     `Loaded amiibo=${Object.keys(datasets.amiibo.amiibos).length} switch=${datasets.switchIndex.size} 3ds=${datasets.ds.length} wiiu=${datasets.wiiu.length}`,
   );

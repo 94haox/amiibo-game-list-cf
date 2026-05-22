@@ -16,8 +16,10 @@ import { runFullGeneration } from "./pipeline.js";
 interface CliOptions {
   output: string;
   missing: string;
+  input: string | null;
   concurrency: number;
   limit: number | null;
+  allowMissing: boolean;
   logLevel: Level;
 }
 
@@ -25,8 +27,10 @@ function parseArgs(argv: string[]): CliOptions {
   const opts: CliOptions = {
     output: "games_info.json",
     missing: "missing_games.json",
+    input: null,
     concurrency: 8,
     limit: null,
+    allowMissing: false,
     logLevel: "info",
   };
   for (let i = 0; i < argv.length; i++) {
@@ -45,6 +49,10 @@ function parseArgs(argv: string[]): CliOptions {
       case "--missing":
         opts.missing = next();
         break;
+      case "-i":
+      case "--input":
+        opts.input = next();
+        break;
       case "-p":
       case "--concurrency":
         opts.concurrency = Number(next());
@@ -57,6 +65,9 @@ function parseArgs(argv: string[]): CliOptions {
         if (!Number.isInteger(opts.limit) || opts.limit < 1) {
           throw new Error(`Invalid limit: ${opts.limit}`);
         }
+        break;
+      case "--allow-missing":
+        opts.allowMissing = true;
         break;
       case "-l":
       case "--log":
@@ -78,8 +89,12 @@ function printHelp(): void {
 
   -o, --output <path>       output JSON path (default: games_info.json)
       --missing <path>      missing games JSON path (default: missing_games.json)
+  -i, --input <path>        read amiibo.json from a local file instead of
+                            fetching from N3evin/AmiiboAPI
   -p, --concurrency <n>     parallel fetchers (default: 8)
       --limit <n>           process only first N amiibo (for smoke tests)
+      --allow-missing       exit 0 even if some titleids couldn't be matched
+                            (default: exit 1 to surface gaps)
   -l, --log <level>         verbose|info|warn|error (default: info)
   -h, --help                show this help
 `);
@@ -98,6 +113,7 @@ async function main(): Promise<void> {
   const result = await runFullGeneration({
     concurrency: opts.concurrency,
     limit: opts.limit,
+    amiiboDatabasePath: opts.input,
     onProgress: (done, total, name) => {
       log.verbose(`${String(done).padStart(3, "0")}/${total} ${name}`);
       if (done % 50 === 0 || done === total) {
@@ -115,8 +131,10 @@ async function main(): Promise<void> {
   }
 
   // Exit code mirrors the original C# behaviour: 0 if clean, 1 if some
-  // titleids couldn't be matched (still a successful run otherwise).
-  process.exit(result.missing.length === 0 ? 0 : 1);
+  // titleids couldn't be matched (still a successful run otherwise). With
+  // --allow-missing the caller treats partial matches as a clean exit too.
+  const exitCode = result.missing.length === 0 || opts.allowMissing ? 0 : 1;
+  process.exit(exitCode);
 }
 
 main().catch((err) => {

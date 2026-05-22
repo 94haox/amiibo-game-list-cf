@@ -47,6 +47,18 @@ export async function loadAmiiboDatabase(): Promise<AmiiboDatabaseRaw> {
   return fetchJsonWithRetry<AmiiboDatabaseRaw>(AMIIBO_DB_URL);
 }
 
+/** Read amiibo.json from the local filesystem. Node-only — used by the CLI
+ *  when the caller supplies their own pre-synced amiibo database (the same
+ *  role as the original C# generator's `-i` flag).
+ */
+export async function loadAmiiboDatabaseFromFile(
+  path: string,
+): Promise<AmiiboDatabaseRaw> {
+  const { readFile } = await import("node:fs/promises");
+  const text = await readFile(path, "utf8");
+  return JSON.parse(text) as AmiiboDatabaseRaw;
+}
+
 /** Layer the local switch2 supplement on top of the index — only adding
  *  keys that titledb doesn't already cover, so upstream always wins.
  *
@@ -113,9 +125,22 @@ export function loadWiiUDataset(): WiiUGame[] {
   return wiiuDataset as WiiUGame[];
 }
 
-export async function loadAllDatasets(): Promise<BaseDatasets> {
+export interface LoadDatasetsOptions {
+  /** If set, read amiibo.json from this local file instead of fetching the
+   *  N3evin/AmiiboAPI upstream. Mirrors the original C# generator's `-i`
+   *  flag — useful when a downstream pipeline (e.g. boon_hono) supplies its
+   *  own pre-synced amiibo database. Node-only. */
+  amiiboDatabasePath?: string | null;
+}
+
+export async function loadAllDatasets(
+  options: LoadDatasetsOptions = {},
+): Promise<BaseDatasets> {
+  const amiiboLoader = options.amiiboDatabasePath
+    ? loadAmiiboDatabaseFromFile(options.amiiboDatabasePath)
+    : loadAmiiboDatabase();
   const [amiibo, switchIndices, ds] = await Promise.all([
-    loadAmiiboDatabase(),
+    amiiboLoader,
     loadSwitchTitleDb(),
     loadDSDatabase(),
   ]);
