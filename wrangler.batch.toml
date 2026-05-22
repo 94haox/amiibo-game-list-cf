@@ -1,0 +1,12 @@
+name = "amiibo-game-list-batch"
+main = "src/batch-worker.ts"
+compatibility_date = "2025-05-15"
+compatibility_flags = ["nodejs_compat"]
+
+# Invoked only through a service binding from the parent (amiibo-game-list);
+# no cron, no public routes. Each invocation gets its own 1000-subrequest
+# budget — that's the whole point of the split.
+
+[[r2_buckets]]
+binding = "OUTPUT_BUCKET"
+bucket_name = "amiibo-game-list"

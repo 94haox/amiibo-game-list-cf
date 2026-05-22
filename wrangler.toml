@@ -8,16 +8,22 @@ compatibility_flags = ["nodejs_compat"]
 crons = ["0 4 * * 1"]
 
 # ------------------------------------------------------------------
-# Bindings — only R2 is required. Create with:
-#   wrangler r2 bucket create amiibo-game-list
+# Bindings
 # ------------------------------------------------------------------
 
 [[r2_buckets]]
 binding = "OUTPUT_BUCKET"
 bucket_name = "amiibo-game-list"
 
+# Batch sub-Worker — each dispatch costs the parent one subrequest, and the
+# child runs in its own isolate with its own 1000-subrequest budget. Deploy
+# the child first (see package.json scripts).
+[[services]]
+binding = "BATCH"
+service = "amiibo-game-list-batch"
+
 # ------------------------------------------------------------------
-# Public vars (non-secret). Override per-environment as needed.
+# Public vars
 # ------------------------------------------------------------------
 
 [vars]

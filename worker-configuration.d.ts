@@ -1,9 +1,11 @@
 // Manually authored env typings. `wrangler types` can regenerate.
-import type { R2Bucket } from "@cloudflare/workers-types";
+import type { Fetcher, R2Bucket } from "@cloudflare/workers-types";
 
 export interface Env {
   // Bindings
   OUTPUT_BUCKET: R2Bucket;
+  /** Service binding to the batch sub-Worker (amiibo-game-list-batch). */
+  BATCH: Fetcher;
 
   // Vars
   ENABLE_GITHUB_COMMIT: string;

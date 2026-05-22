@@ -16,43 +16,60 @@ the listed games against four upstream title-id databases:
 
 ## Architecture
 
-The scheduled handler runs the whole pipeline in one Worker invocation.
-End-to-end takes ~2.5 minutes wall-clock for ~930 amiibo at concurrency 8 —
-well inside a scheduled Worker's 15-minute wall-clock budget, with the
-remainder being network I/O rather than CPU.
+The pipeline is split across two Workers connected by a service binding:
+
+- **`amiibo-game-list`** (parent, `src/index.ts` + `src/scheduled.ts`):
+  cron-triggered orchestrator. Loads + caches datasets, dispatches batches
+  through the service binding, merges results, writes outputs to R2,
+  optionally commits to GitHub. Spends ~15 subrequests per run.
+- **`amiibo-game-list-batch`** (child, `src/batch-worker.ts`):
+  service-binding-only Worker. Reads the cached datasets from R2 and
+  processes ~200 amiibo per invocation. Each call to it counts as **one**
+  subrequest from the parent's view, while the child gets its **own**
+  1000-subrequest budget for the amiibo.life fetches inside.
 
 ```
                               ┌─────────────────────┐
-   cron (weekly) ───────────► │  scheduled handler  │
+   cron (weekly) ───────────► │  parent scheduled   │
                               │  (src/scheduled.ts) │
                               └──────────┬──────────┘
-                                         │
+                                         │ 1. buildCompactDatasets()
+                                         │ 2. R2 put runs/<id>/datasets.json
+                                         │ 3. slice 932 amiibo → 5 batches of 200
+                                         │ 4. Promise.all(BATCH.fetch × 5) ── 5 subrequests
                                          ▼
+                            ┌─────────────────────────┐
+                            │  BATCH service binding  │
+                            └──────────┬──────────────┘
+                                       │  (per-batch isolate, own subrequest budget)
+                                       ▼
                             ┌──────────────────────┐
-                            │  runFullGeneration   │
-                            │  (src/pipeline.ts)   │
-                            │  · load 4 datasets   │
-                            │  · promise pool      │
-                            │    (8x concurrent)   │
-                            │  · per-amiibo fetch  │
-                            │    parse + match     │
-                            │  · sort + serialize  │
+                            │ batch sub-Worker     │
+                            │ (src/batch-worker.ts)│
+                            │  · R2 get cache      │   1 subrequest
+                            │  · pool: 200 amiibo  │ ~210 subrequests
+                            │  · return results    │
                             └──────────┬───────────┘
                                        │
-                ┌──────────────────────┼──────────────────────┐
-                ▼                      ▼                      ▼
-        ┌──────────────┐      ┌──────────────────┐    ┌────────────────┐
-        │ R2 put       │      │ R2 put           │    │ GitHub commit  │
-        │ games_info   │      │ missing_games    │    │ (optional)     │
-        │ + latest     │      │                  │    │                │
-        └──────────────┘      └──────────────────┘    └────────────────┘
+                                       ▼
+                            ┌──────────────────────┐
+                            │ parent merge + sort  │
+                            │  · R2 put games_info │
+                            │  · R2 put missing    │
+                            │  · R2 put latest     │
+                            │  · GitHub commit*    │
+                            └──────────────────────┘
 ```
 
-GitHub commit only fires when `ENABLE_GITHUB_COMMIT=true` and a
+`*` GitHub commit only fires when `ENABLE_GITHUB_COMMIT=true` and a
 `GITHUB_TOKEN` secret is configured.
 
-The same `runFullGeneration` powers `src/cli.ts`, so GitHub Actions runs
-exactly the code that will run on Cloudflare.
+`src/cli.ts` calls `runFullGeneration` directly (in-process, no service
+binding). This is the path GitHub Actions exercises — it shares
+`processOneAmiibo`, the matchers, and the serializer with both Workers,
+so a green CI run still tells you the parsing/matching layer is sound;
+only the parent↔child plumbing is Worker-specific and is exercised the
+first time you `wrangler deploy`.
 
 ## HTTP routes
 
@@ -75,11 +92,11 @@ disable.
 # Cloudflare resource — only the R2 bucket is required
 wrangler r2 bucket create amiibo-game-list
 
-# Secrets (only set what you need)
+# Secrets — set against the parent worker. The batch worker doesn't need any.
 wrangler secret put GITHUB_TOKEN          # PAT with `contents:write` on the target repo
 wrangler secret put INTERNAL_TRIGGER_KEY  # any random string used by POST /trigger
 
-# Vars — set in wrangler.toml or override per environment
+# Vars — edit wrangler.toml (parent) or override per environment
 #   ENABLE_GITHUB_COMMIT=true     turn on the GitHub commit step
 #   GITHUB_OWNER=N3evin           target repo owner
 #   GITHUB_REPO=AmiiboAPI         target repo name
@@ -88,7 +105,12 @@ wrangler secret put INTERNAL_TRIGGER_KEY  # any random string used by POST /trig
 
 npm install
 npm run typecheck
+
+# Order matters: deploy the child first so the parent's service binding
+# can resolve it on first invocation. `npm run deploy` does both:
 npm run deploy
+#   ↳ wrangler deploy --config wrangler.batch.toml   # child first
+#   ↳ wrangler deploy                                # parent
 ```
 
 ## Local development
@@ -105,15 +127,16 @@ The `nodejs_compat` flag is required for `fast-xml-parser`'s buffer usage.
 ## Known constraints
 
 - **Worker memory (128 MB)**: blawar's `US.en.json` is ~85 MB. `JSON.parse`
-  peaks at ~2× the text size during parsing, so the Worker may bump up
-  against the memory ceiling. If you see OOMs in production logs, the next
-  step is to pre-compact titledb (name + id only) into a cached R2 blob and
-  load that instead.
-- **Subrequest limit (1000/request)**: ~932 amiibo + 3 dataset fetches sits
-  close to the limit. Retries are bounded; if a run starts failing with
-  `1101` (subrequest cap), partitioning the work back across multiple
-  invocations is the fix — `git log` has the previous Queue+Durable Object
-  implementation if you need to bring it back.
+  peaks at ~2× the text size during parsing, so the parent Worker may bump
+  up against the memory ceiling while building the compact dataset blob.
+  If you see OOMs in production logs, the next step is to pre-compact
+  titledb on a separate trigger and only persist the `name → ids` slice.
+  The child worker is fine — it only sees the small compact blob.
+- **Subrequest limit (1000/request)**: addressed by the parent/child split.
+  Parent spends ~15 subrequests per run (3 upstream loads + 1 cache put +
+  N service-binding calls + 3 output puts + cleanup + GitHub). Each child
+  invocation spends ~210 (1 cache read + 200 amiibo fetches + retries).
+  Both sit well below the 1000 cap.
 
 ## Determinism
 
@@ -130,7 +153,8 @@ this port preserves the same stabilisation:
 
 | Original (`AmiiboGameList/`) | This repo                       |
 | ---------------------------- | ------------------------------- |
-| `Program.Main`               | `src/pipeline.ts`               |
+| `Program.Main`               | `src/scheduled.ts` + `src/pipeline.ts` |
+| `Parallel.ForEach`           | `src/batch-worker.ts` (service binding fan-out) |
 | `Program.ParseAmiibo`        | `src/parser.ts`                 |
 | `Program.GetAmiilifeStringAsync` | `src/fetch-retry.ts`        |
 | `DBAmiibo` (URL + name)      | `src/amiibo.ts`                 |

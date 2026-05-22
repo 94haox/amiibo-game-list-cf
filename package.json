@@ -7,10 +7,13 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev:batch": "wrangler dev --config wrangler.batch.toml",
+    "deploy": "npm run deploy:batch && npm run deploy:parent",
+    "deploy:parent": "wrangler deploy",
+    "deploy:batch": "wrangler deploy --config wrangler.batch.toml",
     "typecheck": "tsc --noEmit",
-    "trigger": "wrangler triggers deploy",
     "tail": "wrangler tail",
+    "tail:batch": "wrangler tail --config wrangler.batch.toml",
     "generate": "tsx src/cli.ts",
     "generate:smoke": "tsx src/cli.ts --limit 10 --log verbose"
   },

@@ -1,34 +1,29 @@
-// Shared generation pipeline used by both the Worker scheduled handler and
-// the standalone Node CLI. Loads datasets, fans per-amiibo scraping out
-// through a promise pool, then assembles the sorted output payload.
+// Shared generation pipeline.
+//
+// Three layers, used by the Worker scheduled handler, the batch sub-Worker,
+// and the Node CLI:
+//
+//   - processOneAmiibo: per-amiibo fetch + parse + match
+//   - runPool / orchestration helpers
+//   - runFullGeneration: the in-process all-in-one driver used by the CLI
+//
+// The Worker scheduled handler doesn't call runFullGeneration directly —
+// it caches datasets to R2 and dispatches batches through a service binding
+// to the batch sub-Worker (see src/batch-worker.ts) so each batch gets its
+// own subrequest budget.
 
 import { buildAmiiboContext, buildAmiiboUrl, cleanedName } from "./amiibo.js";
-import { loadAllDatasets, type BaseDatasets } from "./datasets.js";
+import { loadAllDatasets, loadWiiUDataset, type BaseDatasets } from "./datasets.js";
 import { NotFoundError, fetchTextWithRetry } from "./fetch-retry.js";
 import { hexCompare, normalizeHex } from "./hex.js";
 import { log } from "./log.js";
 import { parseAmiiboPage } from "./parser.js";
 import { serializeAmiibos } from "./serialize.js";
-import type { AmiiboKeyValue, Games } from "./types.js";
+import type { AmiiboDatabaseRaw, AmiiboKeyValue, DSRelease, Games } from "./types.js";
 
-export interface RunResult {
-  /** JSON-serialized games_info.json (tab-indented, matching C# output). */
-  body: string;
-  /** Sorted list of "Game (Platform)" strings the matcher couldn't resolve. */
-  missing: string[];
-  /** Number of amiibo processed. */
-  totalAmiibo: number;
-  /** Total bytes of body. */
-  bytes: number;
-}
-
-export interface RunOptions {
-  concurrency?: number;
-  /** Stop after the first N amiibo — meant for smoke tests, not production. */
-  limit?: number | null;
-  /** Called after each amiibo with the running counter. */
-  onProgress?: (done: number, total: number, name: string) => void;
-}
+// ---------------------------------------------------------------------------
+// Per-amiibo processing
+// ---------------------------------------------------------------------------
 
 const emptyGames = (): Games => ({
   games3DS: [],
@@ -37,7 +32,7 @@ const emptyGames = (): Games => ({
   gamesSwitch2: [],
 });
 
-async function processAmiibo(
+export async function processOneAmiibo(
   datasets: BaseDatasets,
   amiiboId: string,
   raw: { name: string },
@@ -57,7 +52,7 @@ async function processAmiibo(
   }
 }
 
-async function runPool<T>(
+export async function runPool<T>(
   items: T[],
   worker: (item: T, index: number) => Promise<void>,
   concurrency: number,
@@ -77,8 +72,76 @@ async function runPool<T>(
   await Promise.all(workers);
 }
 
-/** Run the full generation pipeline in one pass and return the serialized
- *  payload. Used by both the scheduled Worker handler and the Node CLI. */
+// ---------------------------------------------------------------------------
+// Compact dataset cache — for R2-mediated transfer to the batch sub-Worker
+// ---------------------------------------------------------------------------
+
+export interface CompactDatasets {
+  amiibo: AmiiboDatabaseRaw;
+  /** Map.entries() output — re-Map on the consuming side. */
+  switchIndex: Array<[string, string[]]>;
+  ds: DSRelease[];
+  // wiiu and the switch2 supplement are bundled into the Worker JS so they
+  // don't need to be cached separately.
+}
+
+export async function buildCompactDatasets(): Promise<CompactDatasets> {
+  const datasets = await loadAllDatasets();
+  return {
+    amiibo: datasets.amiibo,
+    switchIndex: Array.from(datasets.switchIndex.entries()),
+    ds: datasets.ds,
+  };
+}
+
+export function rehydrateDatasets(compact: CompactDatasets): BaseDatasets {
+  const switchIndex = new Map(compact.switchIndex);
+  return {
+    amiibo: compact.amiibo,
+    switchIndex,
+    switch2Index: switchIndex,
+    wiiu: loadWiiUDataset(),
+    ds: compact.ds,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Final output assembly
+// ---------------------------------------------------------------------------
+
+export interface SerializedOutput {
+  body: string;
+  bytes: number;
+}
+
+export function assembleFinalOutput(exportMap: Record<string, Games>): SerializedOutput {
+  const sortedKeys = Object.keys(exportMap).sort(hexCompare);
+  const ordered: Record<string, Games> = {};
+  for (const k of sortedKeys) {
+    const entry = exportMap[k];
+    if (entry !== undefined) ordered[k] = entry;
+  }
+  const payload: AmiiboKeyValue = { amiibos: ordered };
+  const body = serializeAmiibos(payload);
+  return { body, bytes: body.length };
+}
+
+// ---------------------------------------------------------------------------
+// In-process all-in-one driver (used by the Node CLI / GitHub Actions)
+// ---------------------------------------------------------------------------
+
+export interface RunResult extends SerializedOutput {
+  missing: string[];
+  totalAmiibo: number;
+}
+
+export interface RunOptions {
+  concurrency?: number;
+  /** Stop after the first N amiibo — meant for smoke tests, not production. */
+  limit?: number | null;
+  onProgress?: (done: number, total: number, name: string) => void;
+}
+
 export async function runFullGeneration(options: RunOptions = {}): Promise<RunResult> {
   const concurrency = options.concurrency ?? 8;
 
@@ -100,7 +163,7 @@ export async function runFullGeneration(options: RunOptions = {}): Promise<RunRe
   await runPool(
     entries,
     async ([id, raw]) => {
-      const result = await processAmiibo(datasets, id, raw);
+      const result = await processOneAmiibo(datasets, id, raw);
       exportMap[normalizeHex(id)] = result.games;
       for (const m of result.missing) missing.add(m);
       done++;
@@ -109,24 +172,16 @@ export async function runFullGeneration(options: RunOptions = {}): Promise<RunRe
     concurrency,
   );
 
-  const sortedKeys = Object.keys(exportMap).sort(hexCompare);
-  const ordered: Record<string, Games> = {};
-  for (const k of sortedKeys) {
-    const entry = exportMap[k];
-    if (entry !== undefined) ordered[k] = entry;
-  }
-  const payload: AmiiboKeyValue = { amiibos: ordered };
-  const body = serializeAmiibos(payload);
+  const out = assembleFinalOutput(exportMap);
   const missingList = [...missing].sort();
-
   if (missingList.length > 0) {
     log.warn(`${missingList.length} games missing titleids`);
   }
 
   return {
-    body,
+    body: out.body,
+    bytes: out.bytes,
     missing: missingList,
     totalAmiibo: total,
-    bytes: body.length,
   };
 }
