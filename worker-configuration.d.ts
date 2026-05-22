@@ -1,22 +1,9 @@
 // Manually authored env typings. `wrangler types` can regenerate.
-import type { DurableObjectNamespace, KVNamespace, Queue, R2Bucket } from "@cloudflare/workers-types";
-
-export interface JobMessage {
-  runId: string;
-  amiiboId: string; // hex string, "0x..."
-}
-
-export interface FinalizeMessage {
-  runId: string;
-}
+import type { R2Bucket } from "@cloudflare/workers-types";
 
 export interface Env {
   // Bindings
   OUTPUT_BUCKET: R2Bucket;
-  PARTIALS: KVNamespace;
-  JOBS_QUEUE: Queue<JobMessage>;
-  FINALIZE_QUEUE: Queue<FinalizeMessage>;
-  COORDINATOR: DurableObjectNamespace;
 
   // Vars
   ENABLE_GITHUB_COMMIT: string;

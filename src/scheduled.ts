@@ -1,47 +1,68 @@
-// Cron entry point. Loads upstream datasets, persists them to R2 keyed by
-// runId, then fans the per-amiibo work out to the queue. The Durable Object
-// coordinator owns the "all done" trigger that kicks off finalize.
+// Cron entry point. Runs the full generation in a single Worker invocation,
+// writes the result to R2, optionally commits to GitHub, then leaves cleanup
+// in the background via ctx.waitUntil.
 
-import type { Env, JobMessage } from "../worker-configuration";
+import type { ExecutionContext } from "@cloudflare/workers-types";
 
-import { loadAllDatasets } from "./datasets.js";
-import { initCoordinator } from "./coordinator.js";
+import type { Env } from "../worker-configuration";
+
 import { log, setLevel } from "./log.js";
-import { normalizeHex } from "./hex.js";
-import { datasetsR2Key, datasetsToPersisted, enqueueAmiiboBatch, putRunState } from "./state.js";
+import { commitToGitHub } from "./outputs/github.js";
+import { runFullGeneration } from "./pipeline.js";
 
-export async function runScheduledTrigger(env: Env, ctx: ExecutionContext): Promise<string> {
+export const FINAL_OUTPUT_KEY = "games_info.json";
+export const MISSING_OUTPUT_KEY = "missing_games.json";
+export const METADATA_KEY = "latest.json";
+
+export async function runScheduledTrigger(env: Env, ctx: ExecutionContext): Promise<{
+  bytes: number;
+  totalAmiibo: number;
+  missingCount: number;
+}> {
   setLevel("info");
-  const runId = newRunId();
-  log.info(`Starting run ${runId}`);
+  const startedAt = Date.now();
+  const concurrency = Number(env.PARALLELISM) || 8;
 
-  const datasets = await loadAllDatasets();
-  const persisted = datasetsToPersisted(datasets);
-  await env.OUTPUT_BUCKET.put(datasetsR2Key(runId), JSON.stringify(persisted), {
-    httpMetadata: { contentType: "application/json" },
+  const result = await runFullGeneration({
+    concurrency,
+    onProgress: (done, total) => {
+      if (done % 100 === 0 || done === total) log.info(`Progress: ${done}/${total}`);
+    },
   });
-  log.info(`Persisted datasets to R2 (${datasetsR2Key(runId)})`);
 
-  const amiiboIds = Object.keys(datasets.amiibo.amiibos).map(normalizeHex);
-  const total = amiiboIds.length;
-  log.info(`Discovered ${total} amiibo entries`);
+  await env.OUTPUT_BUCKET.put(FINAL_OUTPUT_KEY, result.body, {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+    customMetadata: { generatedAt: new Date().toISOString() },
+  });
+  log.info(`Wrote ${FINAL_OUTPUT_KEY} to R2 (${result.bytes} bytes)`);
 
-  await initCoordinator(env, runId, total);
-  await putRunState(env, { runId, totalAmiibo: total, startedAt: new Date().toISOString() });
+  await env.OUTPUT_BUCKET.put(MISSING_OUTPUT_KEY, JSON.stringify(result.missing, null, 2), {
+    httpMetadata: { contentType: "application/json; charset=utf-8" },
+  });
 
-  // Send in chunks of 100 — sendBatch supports up to 100 messages per call.
-  for (let i = 0; i < amiiboIds.length; i += 100) {
-    const slice = amiiboIds.slice(i, i + 100);
-    const msgs: JobMessage[] = slice.map((amiiboId) => ({ runId, amiiboId }));
-    await enqueueAmiiboBatch(env, msgs);
+  const finishedAt = new Date().toISOString();
+  await env.OUTPUT_BUCKET.put(
+    METADATA_KEY,
+    JSON.stringify({
+      totalAmiibo: result.totalAmiibo,
+      missingCount: result.missing.length,
+      bytes: result.bytes,
+      durationMs: Date.now() - startedAt,
+      finishedAt,
+    }),
+    { httpMetadata: { contentType: "application/json; charset=utf-8" } },
+  );
+
+  // GitHub commit runs in the foreground so failures surface to the cron run.
+  try {
+    await commitToGitHub(env, result.body);
+  } catch (err) {
+    log.error(`GitHub commit failed: ${(err as Error).message}`);
   }
-  log.info(`Enqueued ${total} amiibo jobs for run ${runId}`);
-  return runId;
-}
 
-function newRunId(): string {
-  const d = new Date();
-  const iso = d.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14); // yyyymmddhhmmss
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${iso}-${rand}`;
+  return {
+    bytes: result.bytes,
+    totalAmiibo: result.totalAmiibo,
+    missingCount: result.missing.length,
+  };
 }

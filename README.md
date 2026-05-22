@@ -11,60 +11,48 @@ the listed games against four upstream title-id databases:
 - blawar/titledb `US.en.json` (Switch + Switch 2)
 - 3dsdb.com (3DS)
 - a bundled `WiiU.json` (the same blob that ships in the original .NET project)
+- a bundled `switch2.json` supplement for the handful of Switch 2 games
+  titledb hasn't indexed yet — titledb wins on collision
 
 ## Architecture
 
-A single cron invocation can't realistically scrape ~700 amiibo pages within a
-Worker's per-request budget, so the work is fanned out through two Cloudflare
-Queues with a Durable Object as the run coordinator.
+The scheduled handler runs the whole pipeline in one Worker invocation.
+End-to-end takes ~2.5 minutes wall-clock for ~930 amiibo at concurrency 8 —
+well inside a scheduled Worker's 15-minute wall-clock budget, with the
+remainder being network I/O rather than CPU.
 
 ```
                               ┌─────────────────────┐
    cron (weekly) ───────────► │  scheduled handler  │
                               │  (src/scheduled.ts) │
-                              └────────┬────────────┘
-                                       │ 1. load 4 upstream datasets
-                                       │ 2. persist them to R2 as
-                                       │    runs/<runId>/datasets.json
-                                       │ 3. init Durable Object counter
-                                       │ 4. sendBatch(JobMessage[]) for
-                                       │    every amiibo
-                                       ▼
+                              └──────────┬──────────┘
+                                         │
+                                         ▼
                             ┌──────────────────────┐
-                            │  Queue amiibo-jobs   │
+                            │  runFullGeneration   │
+                            │  (src/pipeline.ts)   │
+                            │  · load 4 datasets   │
+                            │  · promise pool      │
+                            │    (8x concurrent)   │
+                            │  · per-amiibo fetch  │
+                            │    parse + match     │
+                            │  · sort + serialize  │
                             └──────────┬───────────┘
-                                       │ batched delivery
-                                       ▼
-                            ┌──────────────────────┐
-                            │ handleAmiiboBatch    │
-                            │ (src/queue.ts)       │
-                            │  · cache datasets    │
-                            │    per isolate       │
-                            │  · fetch amiibo.life │
-                            │  · parse + match     │
-                            │  · KV PARTIALS put   │
-                            │  · DO increment      │
-                            └──────────┬───────────┘
-                                       │ when DO counter == total
-                                       ▼
-                            ┌──────────────────────┐
-                            │ Queue amiibo-finalize│
-                            └──────────┬───────────┘
-                                       ▼
-                            ┌──────────────────────┐
-                            │ finalizeRun          │
-                            │ (src/finalize.ts)    │
-                            │  · merge partials    │
-                            │  · sort by amiibo id │
-                            │  · serialize JSON    │
-                            │  · R2 put            │
-                            │  · GitHub commit*    │
-                            │  · cleanup KV/R2     │
-                            └──────────────────────┘
+                                       │
+                ┌──────────────────────┼──────────────────────┐
+                ▼                      ▼                      ▼
+        ┌──────────────┐      ┌──────────────────┐    ┌────────────────┐
+        │ R2 put       │      │ R2 put           │    │ GitHub commit  │
+        │ games_info   │      │ missing_games    │    │ (optional)     │
+        │ + latest     │      │                  │    │                │
+        └──────────────┘      └──────────────────┘    └────────────────┘
 ```
 
-`*` GitHub commit only fires when `ENABLE_GITHUB_COMMIT=true` and a
+GitHub commit only fires when `ENABLE_GITHUB_COMMIT=true` and a
 `GITHUB_TOKEN` secret is configured.
+
+The same `runFullGeneration` powers `src/cli.ts`, so GitHub Actions runs
+exactly the code that will run on Cloudflare.
 
 ## HTTP routes
 
@@ -77,18 +65,15 @@ Queues with a Durable Object as the run coordinator.
 | `GET /healthz`        | liveness probe                              |
 | `POST /trigger`       | manual run trigger (Bearer auth)            |
 
-`/trigger` requires `Authorization: Bearer <INTERNAL_TRIGGER_KEY>` and is
-intended for backfills or one-off runs. Leave the secret unset to disable.
+`/trigger` requires `Authorization: Bearer <INTERNAL_TRIGGER_KEY>` and runs
+the generation in the background (`ctx.waitUntil`). Leave the secret unset to
+disable.
 
 ## One-time setup
 
 ```bash
-# Cloudflare resources
+# Cloudflare resource — only the R2 bucket is required
 wrangler r2 bucket create amiibo-game-list
-wrangler kv namespace create PARTIALS                  # paste the id into wrangler.toml
-wrangler queues create amiibo-jobs
-wrangler queues create amiibo-jobs-dlq
-wrangler queues create amiibo-finalize
 
 # Secrets (only set what you need)
 wrangler secret put GITHUB_TOKEN          # PAT with `contents:write` on the target repo
@@ -110,10 +95,25 @@ npm run deploy
 
 ```bash
 npm install
-npm run dev   # wrangler dev — local Worker with miniflare-backed bindings
+npm run dev           # wrangler dev — local Worker with miniflare-backed R2
+npm run generate      # Node CLI — runs the whole pipeline, writes to disk
+npm run generate:smoke -- --limit 20   # quick 20-amiibo end-to-end check
 ```
 
 The `nodejs_compat` flag is required for `fast-xml-parser`'s buffer usage.
+
+## Known constraints
+
+- **Worker memory (128 MB)**: blawar's `US.en.json` is ~85 MB. `JSON.parse`
+  peaks at ~2× the text size during parsing, so the Worker may bump up
+  against the memory ceiling. If you see OOMs in production logs, the next
+  step is to pre-compact titledb (name + id only) into a cached R2 blob and
+  load that instead.
+- **Subrequest limit (1000/request)**: ~932 amiibo + 3 dataset fetches sits
+  close to the limit. Retries are bounded; if a run starts failing with
+  `1101` (subrequest cap), partitioning the work back across multiple
+  invocations is the fix — `git log` has the previous Queue+Durable Object
+  implementation if you need to bring it back.
 
 ## Determinism
 
@@ -128,17 +128,18 @@ this port preserves the same stabilisation:
 
 ## Mapping to the original project
 
-| Original (`AmiiboGameList/`) | This repo                  |
-| ---------------------------- | -------------------------- |
-| `Program.Main`               | `src/scheduled.ts`         |
-| `Program.ParseAmiibo`        | `src/parser.ts`            |
-| `Program.GetAmiilifeStringAsync` | `src/fetch-retry.ts`   |
-| `DBAmiibo` (URL + name)      | `src/amiibo.ts`            |
-| Per-platform `switch` arms   | `src/matchers.ts`          |
-| `Hex`                        | `src/hex.ts`               |
-| `Properties.Resources.WiiU`  | `src/resources/wiiu.json`  |
-| `Debugger`                   | `src/log.ts`               |
-| File output                  | `src/finalize.ts` + R2     |
+| Original (`AmiiboGameList/`) | This repo                       |
+| ---------------------------- | ------------------------------- |
+| `Program.Main`               | `src/pipeline.ts`               |
+| `Program.ParseAmiibo`        | `src/parser.ts`                 |
+| `Program.GetAmiilifeStringAsync` | `src/fetch-retry.ts`        |
+| `DBAmiibo` (URL + name)      | `src/amiibo.ts`                 |
+| Per-platform `switch` arms   | `src/matchers.ts`               |
+| `Hex`                        | `src/hex.ts`                    |
+| `Properties.Resources.WiiU`  | `src/resources/wiiu.json`       |
+| Switch 2 hardcoded patches   | `src/resources/switch2.json`    |
+| `Debugger`                   | `src/log.ts`                    |
+| File output                  | `src/scheduled.ts` + R2         |
 
 ## License
 
