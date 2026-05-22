@@ -41,10 +41,9 @@ const SWITCH_FALLBACKS: Record<string, string[]> = {
   "Yu-Gi-Oh! Rush Duel Saikyo Battle Royale": ["01003C101454A000"],
 };
 
-const SWITCH2_FALLBACKS: Record<string, string[]> = {
-  "Donkey Kong Bananza": ["70010000096809"],
-  "Kirby Air Riders": ["70010000103775"],
-};
+// Switch 2 fallbacks moved to src/resources/switch2.json — see datasets.ts
+// layerSwitch2Supplement. The supplement is merged into switch2Index, so
+// resolveSwitch2 below doesn't need a separate fallback table.
 
 const WIIU_FALLBACKS: Record<string, string[]> = {
   "Shovel Knight Showdown": [
@@ -81,10 +80,9 @@ export function resolveSwitch(sanitized: string, original: string, db: BaseDatas
 }
 
 export function resolveSwitch2(sanitized: string, original: string, db: BaseDatasets): MatchResult {
+  // switch2Index = titledb ∪ switch2.json supplement (titledb wins on collision).
   const ids = db.switch2Index.get(sanitized.toLowerCase()) ?? [];
   if (ids.length > 0) return { ids: dedupeSort(ids), missing: false };
-  const fb = SWITCH2_FALLBACKS[sanitized];
-  if (fb) return { ids: dedupeSort(fb), missing: false };
   return { ids: [], missing: true };
 }
 

@@ -3,9 +3,18 @@
 import { XMLParser } from "fast-xml-parser";
 
 import { fetchBytesWithRetry, fetchJsonWithRetry, fetchTextWithRetry } from "./fetch-retry.js";
+import { log } from "./log.js";
 import { normalizeTitleKey } from "./text.js";
 import type { AmiiboDatabaseRaw, BlawarEntry, DSRelease, WiiUGame } from "./types.js";
 import wiiuDataset from "./resources/wiiu.json";
+import switch2Supplement from "./resources/switch2.json";
+
+interface Switch2SupplementEntry {
+  id: string;
+  name: string;
+  source?: string;
+  comment?: string;
+}
 
 export const AMIIBO_DB_URL =
   "https://raw.githubusercontent.com/N3evin/AmiiboAPI/master/database/amiibo.json";
@@ -38,19 +47,45 @@ export async function loadAmiiboDatabase(): Promise<AmiiboDatabaseRaw> {
   return fetchJsonWithRetry<AmiiboDatabaseRaw>(AMIIBO_DB_URL);
 }
 
+/** Layer the local switch2 supplement on top of the index — only adding
+ *  keys that titledb doesn't already cover, so upstream always wins.
+ *
+ *  blawar/titledb is archived (2024-02) and currently has zero `7001xxxx`
+ *  Switch 2 entries, so for Switch 2 games we maintain a hand-curated
+ *  src/resources/switch2.json. Replace this once any upstream titledb fork
+ *  ships native Switch 2 coverage.
+ */
+function layerSwitch2Supplement(index: Map<string, string[]>): { added: number; skipped: number } {
+  let added = 0;
+  let skipped = 0;
+  for (const entry of switch2Supplement as Switch2SupplementEntry[]) {
+    if (!entry?.id || !entry?.name) continue;
+    const key = normalizeTitleKey(entry.name);
+    if (index.has(key)) {
+      skipped++;
+      continue;
+    }
+    index.set(key, [entry.id]);
+    added++;
+  }
+  return { added, skipped };
+}
+
 export async function loadSwitchTitleDb(): Promise<{
   switchIndex: Map<string, string[]>;
   switch2Index: Map<string, string[]>;
 }> {
   const text = await fetchTextWithRetry(TITLEDB_URL);
   // The titledb file is keyed by title id (hex). We parse once and re-bucket
-  // for Switch vs Switch 2. Today blawar's file is a flat dict; we treat each
-  // entry uniformly because the C# code does the same — the platform split is
-  // determined by the amiibo.life HTML tag, not by the titledb.
+  // for Switch vs Switch 2. blawar's file is a flat dict; the platform split
+  // is determined by the amiibo.life HTML tag, not by the titledb.
   const raw = JSON.parse(text) as Record<string, BlawarEntry>;
   const switchIndex = buildTitleIndex(raw);
-  // Switch 2 entries live in the same file under newer ids; the C# port reuses
-  // the whole file for both buckets and lets the page tag disambiguate.
+  // titledb has no 7001xxxx entries today; the supplement file fills the gap
+  // for known Switch 2 amiibo-relevant games. titledb wins on collisions.
+  const { added, skipped } = layerSwitch2Supplement(switchIndex);
+  log.info(`Switch 2 supplement: added=${added} skipped=${skipped} (titledb wins on collision)`);
+  // Switch 2 entries share the index — the amiibo.life HTML tag disambiguates.
   return { switchIndex, switch2Index: switchIndex };
 }
 
