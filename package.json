@@ -12,6 +12,7 @@
     "deploy:parent": "wrangler deploy",
     "deploy:batch": "wrangler deploy --config wrangler.batch.toml",
     "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/**/*.test.ts",
     "tail": "wrangler tail",
     "tail:batch": "wrangler tail --config wrangler.batch.toml",
     "generate": "tsx src/cli.ts",
