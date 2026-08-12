@@ -119,8 +119,19 @@ npm run deploy
 npm install
 npm run dev           # wrangler dev — local Worker with miniflare-backed R2
 npm run generate      # Node CLI — runs the whole pipeline, writes to disk
+npm run generate -- --incremental \
+  --input amiibo.json \
+  --previous-amiibo previous/amiibo.json \
+  --previous-games-info previous/games_info.json
 npm run generate:smoke -- --limit 20   # quick 20-amiibo end-to-end check
 ```
+
+`--incremental` is intended for downstream workflows such as `boon_hono` that
+already have a committed `amiibo.json` and `games_info.json`. The CLI compares
+the previous amiibo record fingerprints with the current `--input` database,
+reuses unchanged entries from the previous games info file, and only fetches
+amiibo.life pages for new or changed amiibo. Use `--force-full` to bypass reuse
+when parser logic or title-id resources change.
 
 The `nodejs_compat` flag is required for `fast-xml-parser`'s buffer usage.
 

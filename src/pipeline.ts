@@ -12,7 +12,14 @@
 // to the batch sub-Worker (see src/batch-worker.ts) so each batch gets its
 // own subrequest budget.
 
-import { buildAmiiboContext, buildAmiiboUrl, cleanedName } from "./amiibo.js";
+import {
+  amiiboSeries,
+  amiiboType,
+  buildAmiiboContext,
+  buildAmiiboUrl,
+  characterName,
+  cleanedName,
+} from "./amiibo.js";
 import { loadAllDatasets, loadWiiUDataset, type BaseDatasets } from "./datasets.js";
 import { NotFoundError, fetchTextWithRetry } from "./fetch-retry.js";
 import { hexCompare, normalizeHex } from "./hex.js";
@@ -133,6 +140,9 @@ export function assembleFinalOutput(exportMap: Record<string, Games>): Serialize
 export interface RunResult extends SerializedOutput {
   missing: string[];
   totalAmiibo: number;
+  processedAmiibo: number;
+  reusedAmiibo: number;
+  forceFullReason: string | null;
 }
 
 export interface RunOptions {
@@ -141,37 +151,163 @@ export interface RunOptions {
   limit?: number | null;
   /** Local amiibo.json path; bypasses the N3evin/AmiiboAPI HTTP fetch. */
   amiiboDatabasePath?: string | null;
+  /** Previous amiibo database used to decide which entries can be reused. */
+  previousAmiibo?: AmiiboDatabaseRaw | null;
+  /** Previous games_info.json output to reuse unchanged entries from. */
+  previousGames?: AmiiboKeyValue | null;
+  /** Enable reuse from previousAmiibo + previousGames when available. */
+  incremental?: boolean;
+  /** Ignore previous inputs and process all selected amiibo. */
+  forceFull?: boolean;
   onProgress?: (done: number, total: number, name: string) => void;
 }
 
-export async function runFullGeneration(options: RunOptions = {}): Promise<RunResult> {
-  const concurrency = options.concurrency ?? 8;
+export type AmiiboProcessor = typeof processOneAmiibo;
 
-  log.info("Loading datasets…");
-  const datasets = await loadAllDatasets({
-    amiiboDatabasePath: options.amiiboDatabasePath ?? null,
+export interface IncrementalPlan {
+  processIds: string[];
+  reusedIds: string[];
+  reusedGames: Record<string, Games>;
+  forceFullReason: string | null;
+}
+
+interface GenerationWithDatasetsOptions extends Omit<RunOptions, "amiiboDatabasePath"> {
+  processor?: AmiiboProcessor;
+}
+
+function amiiboFingerprint(
+  database: AmiiboDatabaseRaw,
+  id: string,
+  raw: { name: string },
+): string {
+  const ctx = buildAmiiboContext(database, id, raw);
+  return JSON.stringify({
+    name: raw.name,
+    series: amiiboSeries(ctx),
+    character: characterName(ctx),
+    type: amiiboType(ctx),
+    release: "release" in raw ? raw.release : undefined,
   });
-  log.info(
-    `Loaded amiibo=${Object.keys(datasets.amiibo.amiibos).length} switch=${datasets.switchIndex.size} 3ds=${datasets.ds.length} wiiu=${datasets.wiiu.length}`,
-  );
+}
 
-  let entries = Object.entries(datasets.amiibo.amiibos);
-  if (options.limit != null) entries = entries.slice(0, options.limit);
-  const total = entries.length;
-  log.info(`Processing ${total} amiibo (concurrency=${concurrency})…`);
+function previousGamesFor(
+  previousGames: AmiiboKeyValue,
+  id: string,
+): Games | undefined {
+  const normalized = normalizeHex(id);
+  return previousGames.amiibos[normalized] ?? previousGames.amiibos[id];
+}
+
+export function buildIncrementalPlan(
+  datasets: BaseDatasets,
+  inputs: {
+    previousAmiibo?: AmiiboDatabaseRaw | null;
+    previousGames?: AmiiboKeyValue | null;
+    forceFull?: boolean;
+  } = {},
+): IncrementalPlan {
+  const currentIds = Object.keys(datasets.amiibo.amiibos);
+  if (inputs.forceFull) {
+    return {
+      processIds: currentIds,
+      reusedIds: [],
+      reusedGames: {},
+      forceFullReason: "forced",
+    };
+  }
+  if (!inputs.previousAmiibo || !inputs.previousGames) {
+    return {
+      processIds: currentIds,
+      reusedIds: [],
+      reusedGames: {},
+      forceFullReason: "missing previous amiibo or games_info",
+    };
+  }
+
+  const processIds: string[] = [];
+  const reusedIds: string[] = [];
+  const reusedGames: Record<string, Games> = {};
+
+  for (const [id, raw] of Object.entries(datasets.amiibo.amiibos)) {
+    const normalized = normalizeHex(id);
+    const previousRaw = inputs.previousAmiibo.amiibos[id] ?? inputs.previousAmiibo.amiibos[normalized];
+    const previousGame = previousGamesFor(inputs.previousGames, id);
+    if (!previousRaw || !previousGame) {
+      processIds.push(id);
+      continue;
+    }
+    const currentFingerprint = amiiboFingerprint(datasets.amiibo, id, raw);
+    const previousFingerprint = amiiboFingerprint(inputs.previousAmiibo, id, previousRaw);
+    if (currentFingerprint !== previousFingerprint) {
+      processIds.push(id);
+      continue;
+    }
+    reusedIds.push(normalized);
+    reusedGames[normalized] = previousGame;
+  }
+
+  return {
+    processIds,
+    reusedIds,
+    reusedGames,
+    forceFullReason: null,
+  };
+}
+
+export async function runGenerationWithDatasets(
+  datasets: BaseDatasets,
+  options: GenerationWithDatasetsOptions = {},
+): Promise<RunResult> {
+  const concurrency = options.concurrency ?? 8;
+  const processor = options.processor ?? processOneAmiibo;
+  const hasPrevious = Boolean(options.previousAmiibo && options.previousGames);
+  const incremental = options.incremental ?? hasPrevious;
+  const plan = incremental || options.forceFull
+    ? buildIncrementalPlan(datasets, {
+        previousAmiibo: options.previousAmiibo ?? null,
+        previousGames: options.previousGames ?? null,
+        forceFull: options.forceFull ?? false,
+      })
+    : {
+        processIds: Object.keys(datasets.amiibo.amiibos),
+        reusedIds: [],
+        reusedGames: {},
+        forceFullReason: null,
+      };
+
+  let selectedEntries = Object.entries(datasets.amiibo.amiibos);
+  if (options.limit != null) selectedEntries = selectedEntries.slice(0, options.limit);
+  const selectedIds = new Set(selectedEntries.map(([id]) => id));
+  const processIds = plan.processIds.filter((id) => selectedIds.has(id));
+  const total = selectedEntries.length;
+
+  log.info(
+    `Processing ${processIds.length}/${total} amiibo (reusing ${total - processIds.length}, concurrency=${concurrency})…`,
+  );
+  if (plan.forceFullReason) {
+    log.info(`Incremental reuse disabled: ${plan.forceFullReason}`);
+  }
 
   const exportMap: Record<string, Games> = {};
+  for (const [id] of selectedEntries) {
+    const normalized = normalizeHex(id);
+    const reused = plan.reusedGames[normalized];
+    if (reused) exportMap[normalized] = reused;
+  }
+
   const missing = new Set<string>();
   let done = 0;
 
   await runPool(
-    entries,
-    async ([id, raw]) => {
-      const result = await processOneAmiibo(datasets, id, raw);
+    processIds,
+    async (id) => {
+      const raw = datasets.amiibo.amiibos[id];
+      if (!raw) return;
+      const result = await processor(datasets, id, raw);
       exportMap[normalizeHex(id)] = result.games;
       for (const m of result.missing) missing.add(m);
       done++;
-      options.onProgress?.(done, total, raw.name);
+      options.onProgress?.(done, processIds.length, raw.name);
     },
     concurrency,
   );
@@ -187,5 +323,20 @@ export async function runFullGeneration(options: RunOptions = {}): Promise<RunRe
     bytes: out.bytes,
     missing: missingList,
     totalAmiibo: total,
+    processedAmiibo: processIds.length,
+    reusedAmiibo: total - processIds.length,
+    forceFullReason: plan.forceFullReason,
   };
+}
+
+export async function runFullGeneration(options: RunOptions = {}): Promise<RunResult> {
+  log.info("Loading datasets…");
+  const datasets = await loadAllDatasets({
+    amiiboDatabasePath: options.amiiboDatabasePath ?? null,
+  });
+  log.info(
+    `Loaded amiibo=${Object.keys(datasets.amiibo.amiibos).length} switch=${datasets.switchIndex.size} 3ds=${datasets.ds.length} wiiu=${datasets.wiiu.length}`,
+  );
+
+  return runGenerationWithDatasets(datasets, options);
 }

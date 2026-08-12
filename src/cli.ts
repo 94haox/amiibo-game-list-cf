@@ -6,20 +6,25 @@
 //   tsx src/cli.ts [--output games_info.json] [--concurrency 8] [--limit N]
 //                  [--missing missing_games.json]
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import process from "node:process";
 
 import { log, setLevel, type Level } from "./log.js";
 import { runFullGeneration } from "./pipeline.js";
+import type { AmiiboDatabaseRaw, AmiiboKeyValue } from "./types.js";
 
 interface CliOptions {
   output: string;
   missing: string;
   input: string | null;
+  previousAmiibo: string | null;
+  previousGamesInfo: string | null;
   concurrency: number;
   limit: number | null;
   allowMissing: boolean;
+  incremental: boolean;
+  forceFull: boolean;
   logLevel: Level;
 }
 
@@ -28,9 +33,13 @@ function parseArgs(argv: string[]): CliOptions {
     output: "games_info.json",
     missing: "missing_games.json",
     input: null,
+    previousAmiibo: null,
+    previousGamesInfo: null,
     concurrency: 8,
     limit: null,
     allowMissing: false,
+    incremental: false,
+    forceFull: false,
     logLevel: "info",
   };
   for (let i = 0; i < argv.length; i++) {
@@ -52,6 +61,18 @@ function parseArgs(argv: string[]): CliOptions {
       case "-i":
       case "--input":
         opts.input = next();
+        break;
+      case "--previous-amiibo":
+        opts.previousAmiibo = next();
+        break;
+      case "--previous-games-info":
+        opts.previousGamesInfo = next();
+        break;
+      case "--incremental":
+        opts.incremental = true;
+        break;
+      case "--force-full":
+        opts.forceFull = true;
         break;
       case "-p":
       case "--concurrency":
@@ -91,6 +112,12 @@ function printHelp(): void {
       --missing <path>      missing games JSON path (default: missing_games.json)
   -i, --input <path>        read amiibo.json from a local file instead of
                             fetching from N3evin/AmiiboAPI
+      --incremental         reuse unchanged entries from previous files
+      --previous-amiibo <path>
+                            previous amiibo.json for incremental comparison
+      --previous-games-info <path>
+                            previous games_info.json to merge reused entries
+      --force-full          process all amiibo even when previous files exist
   -p, --concurrency <n>     parallel fetchers (default: 8)
       --limit <n>           process only first N amiibo (for smoke tests)
       --allow-missing       exit 0 even if some titleids couldn't be matched
@@ -106,14 +133,28 @@ async function writeOutput(path: string, body: string): Promise<void> {
   await writeFile(path, body);
 }
 
+async function readJson<T>(path: string | null): Promise<T | null> {
+  if (!path) return null;
+  const text = await readFile(path, "utf8");
+  return JSON.parse(text) as T;
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   setLevel(opts.logLevel);
+  const [previousAmiibo, previousGames] = await Promise.all([
+    readJson<AmiiboDatabaseRaw>(opts.previousAmiibo),
+    readJson<AmiiboKeyValue>(opts.previousGamesInfo),
+  ]);
 
   const result = await runFullGeneration({
     concurrency: opts.concurrency,
     limit: opts.limit,
     amiiboDatabasePath: opts.input,
+    previousAmiibo,
+    previousGames,
+    incremental: opts.incremental || Boolean(previousAmiibo || previousGames),
+    forceFull: opts.forceFull,
     onProgress: (done, total, name) => {
       log.verbose(`${String(done).padStart(3, "0")}/${total} ${name}`);
       if (done % 50 === 0 || done === total) {
@@ -124,6 +165,9 @@ async function main(): Promise<void> {
 
   await writeOutput(opts.output, result.body);
   log.info(`Wrote ${opts.output}`);
+  log.info(
+    `Run stats: total=${result.totalAmiibo} processed=${result.processedAmiibo} reused=${result.reusedAmiibo}`,
+  );
 
   await writeOutput(opts.missing, JSON.stringify(result.missing, null, 2));
   if (result.missing.length > 0) {
