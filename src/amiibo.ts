@@ -105,6 +105,7 @@ export function amiiboSeries(ctx: AmiiboContext): string {
   const key = amiiboSeriesKey(ctx.id);
   const raw = ctx.database.amiibo_series[key] ?? "";
   switch (raw) {
+    case "8 - Bit Mario":
     case "8-bit Mario":
       return "Super Mario Bros 30th Anniversary";
     case "Legend Of Zelda":
@@ -119,6 +120,7 @@ export function amiiboSeries(ctx: AmiiboContext): string {
       return "Super Mario";
     case "Xenoblade Chronicles 3":
       return "Xenoblade Chronicles";
+    case "Yu-Gi-Oh":
     case "Yu-Gi-Oh!":
       return "Yu-Gi-Oh! Rush Duel Saikyo Battle Royale";
     default:
@@ -253,6 +255,14 @@ const AMIIBO_LIFE_URL_OVERRIDES: Record<string, string> = {
 };
 
 const AMIIBO_LIFE_URL_OVERRIDES_BY_ID: Record<string, string> = {
+  "0x0000000002380602": "https://amiibo.life/amiibo/super-mario-bros-30th-anniversary/mario-classic-colors",
+  "0x0000000002390602": "https://amiibo.life/amiibo/super-mario-bros-30th-anniversary/mario-modern-colors",
+  "0x00080100042f1a02": "https://amiibo.life/amiibo/donkey-kong/donkey-kong-pauline",
+  "0x0807000004f70402": "https://amiibo.life/amiibo/splatoon/shiver-splatoon-raiders",
+  "0x0808000004f80402": "https://amiibo.life/amiibo/splatoon/frye-splatoon-raiders",
+  "0x0809000004f90402": "https://amiibo.life/amiibo/splatoon/big-man-splatoon-raiders",
+  "0x1f02000004c71e03": "https://amiibo.life/amiibo/kirby-air-riders/king-dedede-tank-star",
+  "0x3840000104241902": "https://amiibo.life/amiibo/yu-gi-oh-rush-duel-saikyo-battle-royale/yuga-ohdo",
   "0x34c0000104a81d02": "https://amiibo.life/amiibo/street-fighter-6-starter-set/ryu",
   "0x34c0000104cb1d02": "https://amiibo.life/amiibo/street-fighter-6-booster-pack/ryu",
   "0x34c1000104a91d02": "https://amiibo.life/amiibo/street-fighter-6-starter-set/ken",
@@ -381,7 +391,10 @@ async function resolveAnimalCrossingCardUrl(character: string): Promise<string> 
 }
 
 /** Build the canonical amiibo.life URL for a given amiibo, mirroring the C# Lazy<string>. */
-export async function buildAmiiboUrl(ctx: AmiiboContext): Promise<string> {
+export async function buildAmiiboUrl(
+  ctx: AmiiboContext,
+  canonicalUrl?: string,
+): Promise<string> {
   const series = amiiboSeries(ctx);
   const type = amiiboType(ctx);
   const name = cleanedName(ctx.originalName, series);
@@ -391,6 +404,8 @@ export async function buildAmiiboUrl(ctx: AmiiboContext): Promise<string> {
   if (type === "Card" && series === "Animal Crossing") {
     return resolveAnimalCrossingCardUrl(characterName(ctx));
   }
+
+  if (canonicalUrl) return canonicalUrl;
 
   let seriesSlug = series.toLowerCase().replace(/[!.]/g, "").replace(/[' ]/g, "-");
 
