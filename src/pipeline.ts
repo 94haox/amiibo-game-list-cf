@@ -46,14 +46,14 @@ export async function processOneAmiibo(
 ): Promise<{ games: Games; missing: string[] }> {
   const ctx = buildAmiiboContext(datasets.amiibo, amiiboId, raw);
   const cleaned = cleanedName(ctx.originalName);
-  const url = await buildAmiiboUrl(ctx);
+  const url = await buildAmiiboUrl(ctx, datasets.amiiboLifeUrls.get(normalizeHex(amiiboId)));
   try {
     const html = await fetchTextWithRetry(url);
     return parseAmiiboPage(html, { amiiboName: cleaned, datasets });
   } catch (err) {
     if (err instanceof NotFoundError) {
       log.warn(`404 amiibo.life for ${cleaned} (${ctx.originalName})`);
-      return { games: emptyGames(), missing: [] };
+      return { games: emptyGames(), missing: [`amiibo.life 404: ${cleaned} (${url})`] };
     }
     throw err;
   }
@@ -85,6 +85,7 @@ export async function runPool<T>(
 
 export interface CompactDatasets {
   amiibo: AmiiboDatabaseRaw;
+  amiiboLifeUrls: Array<[string, string]>;
   /** Map.entries() output — re-Map on the consuming side. */
   switchIndex: Array<[string, string[]]>;
   ds: DSRelease[];
@@ -96,6 +97,7 @@ export async function buildCompactDatasets(): Promise<CompactDatasets> {
   const datasets = await loadAllDatasets();
   return {
     amiibo: datasets.amiibo,
+    amiiboLifeUrls: Array.from(datasets.amiiboLifeUrls.entries()),
     switchIndex: Array.from(datasets.switchIndex.entries()),
     ds: datasets.ds,
   };
@@ -105,6 +107,7 @@ export function rehydrateDatasets(compact: CompactDatasets): BaseDatasets {
   const switchIndex = new Map(compact.switchIndex);
   return {
     amiibo: compact.amiibo,
+    amiiboLifeUrls: new Map(compact.amiiboLifeUrls),
     switchIndex,
     switch2Index: switchIndex,
     wiiu: loadWiiUDataset(),
@@ -198,6 +201,17 @@ function previousGamesFor(
   return previousGames.amiibos[normalized] ?? previousGames.amiibos[id];
 }
 
+function hasUsage(games: Games): boolean {
+  return [
+    games.games3DS,
+    games.gamesWiiU,
+    games.gamesSwitch,
+    games.gamesSwitch2,
+  ].some((platformGames) =>
+    platformGames.some((game) => game.amiiboUsage.length > 0),
+  );
+}
+
 export function buildIncrementalPlan(
   datasets: BaseDatasets,
   inputs: {
@@ -232,7 +246,7 @@ export function buildIncrementalPlan(
     const normalized = normalizeHex(id);
     const previousRaw = inputs.previousAmiibo.amiibos[id] ?? inputs.previousAmiibo.amiibos[normalized];
     const previousGame = previousGamesFor(inputs.previousGames, id);
-    if (!previousRaw || !previousGame) {
+    if (!previousRaw || !previousGame || !hasUsage(previousGame)) {
       processIds.push(id);
       continue;
     }

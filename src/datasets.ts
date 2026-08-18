@@ -1,8 +1,10 @@
-// Loaders for the four upstream datasets the generator depends on.
+// Loaders for the upstream datasets the generator depends on.
 
 import { XMLParser } from "fast-xml-parser";
 
+import { amiiboSeries, buildAmiiboContext } from "./amiibo.js";
 import { fetchBytesWithRetry, fetchJsonWithRetry, fetchTextWithRetry } from "./fetch-retry.js";
+import { normalizeHex } from "./hex.js";
 import { log } from "./log.js";
 import { normalizeTitleKey } from "./text.js";
 import type { AmiiboDatabaseRaw, BlawarEntry, DSRelease, WiiUGame } from "./types.js";
@@ -21,13 +23,29 @@ export const AMIIBO_DB_URL =
 export const TITLEDB_URL =
   "https://raw.githubusercontent.com/blawar/titledb/master/US.en.json";
 export const DSDB_URL = "http://3dsdb.com/xml.php";
+export const AMIIBO_LIFE_FIGURES_URL = "https://amiibo.life/figures.json";
 
 export interface BaseDatasets {
   amiibo: AmiiboDatabaseRaw;
+  amiiboLifeUrls: Map<string, string>; // key: normalized amiibo id -> canonical detail URL
   switchIndex: Map<string, string[]>;  // key: normalized name -> list of title ids
   switch2Index: Map<string, string[]>; // same shape, Switch 2 titles
   wiiu: WiiUGame[];
   ds: DSRelease[];
+}
+
+export interface AmiiboLifeFigure {
+  name?: unknown;
+  series_name?: unknown;
+  url?: unknown;
+}
+
+interface IndexedAmiiboLifeFigure {
+  url: string;
+  fullName: string;
+  withoutSplatoon: string;
+  withoutParentheses: string;
+  beforeAnd: string;
 }
 
 /** Build a lowercase-name -> ids lookup map, mirroring the C# Lookup<string, string>. */
@@ -45,6 +63,140 @@ function buildTitleIndex(raw: Record<string, BlawarEntry>): Map<string, string[]
 
 export async function loadAmiiboDatabase(): Promise<AmiiboDatabaseRaw> {
   return fetchJsonWithRetry<AmiiboDatabaseRaw>(AMIIBO_DB_URL);
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function normalizeAmiiboName(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9()]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSeriesName(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\bthe\b/g, "")
+    .replace(/\s+series\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function removeSplatoonToken(value: string): string {
+  return value
+    .replace(/\bsplatoon\b/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\(\s+/g, "(")
+    .replace(/\s+\)/g, ")")
+    .trim();
+}
+
+function removeParentheticalText(value: string): string {
+  return value.replace(/\s*\([^)]*\)/g, "").replace(/\s+/g, " ").trim();
+}
+
+function nameBeforeAnd(value: string): string {
+  return value.split(" and ", 1)[0]?.trim() ?? value;
+}
+
+function matchScore(name: string, candidate: IndexedAmiiboLifeFigure): number {
+  if (name === candidate.fullName) return 100;
+  if (removeSplatoonToken(name) === candidate.withoutSplatoon) return 95;
+  if (removeParentheticalText(name) === candidate.withoutParentheses) return 85;
+  if (nameBeforeAnd(name) === candidate.beforeAnd) return 70;
+  return 0;
+}
+
+function canonicalAmiiboLifeUrl(value: string): string | null {
+  if (value.startsWith("/amiibo/")) return `https://amiibo.life${value}`;
+  if (value.startsWith("https://amiibo.life/amiibo/")) return value;
+  return null;
+}
+
+/** Resolve canonical amiibo.life detail URLs from its structured catalogue.
+ *  Matching is series-scoped where possible, and ambiguous fuzzy matches are
+ *  deliberately ignored so the legacy URL builder can handle them safely.
+ */
+export function buildAmiiboLifeUrlIndex(
+  database: AmiiboDatabaseRaw,
+  figures: AmiiboLifeFigure[],
+): Map<string, string> {
+  const all: IndexedAmiiboLifeFigure[] = [];
+  const bySeries = new Map<string, IndexedAmiiboLifeFigure[]>();
+
+  for (const figure of figures) {
+    const name = stringValue(figure.name);
+    const rawUrl = stringValue(figure.url);
+    const url = rawUrl ? canonicalAmiiboLifeUrl(rawUrl) : null;
+    if (!name || !url) continue;
+
+    const fullName = normalizeAmiiboName(name);
+    const indexed: IndexedAmiiboLifeFigure = {
+      url,
+      fullName,
+      withoutSplatoon: removeSplatoonToken(fullName),
+      withoutParentheses: removeParentheticalText(fullName),
+      beforeAnd: nameBeforeAnd(fullName),
+    };
+    all.push(indexed);
+
+    const series = stringValue(figure.series_name);
+    if (!series) continue;
+    const seriesKey = normalizeSeriesName(series);
+    const candidates = bySeries.get(seriesKey) ?? [];
+    candidates.push(indexed);
+    bySeries.set(seriesKey, candidates);
+  }
+
+  const urls = new Map<string, string>();
+  for (const [id, raw] of Object.entries(database.amiibos)) {
+    const ctx = buildAmiiboContext(database, id, raw);
+    const seriesCandidates = bySeries.get(normalizeSeriesName(amiiboSeries(ctx))) ?? [];
+    const candidates = seriesCandidates.length > 0 ? seriesCandidates : all;
+    const name = normalizeAmiiboName(raw.name);
+    let best: IndexedAmiiboLifeFigure | null = null;
+    let bestScore = 0;
+    let ambiguous = false;
+
+    for (const candidate of candidates) {
+      const score = matchScore(name, candidate);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+        ambiguous = false;
+      } else if (score > 0 && score === bestScore) {
+        ambiguous = true;
+      }
+    }
+
+    if (best && bestScore >= 70 && !ambiguous) {
+      urls.set(normalizeHex(id), best.url);
+    }
+  }
+
+  return urls;
+}
+
+async function loadAmiiboLifeFigures(): Promise<AmiiboLifeFigure[]> {
+  try {
+    const value = await fetchJsonWithRetry<unknown>(AMIIBO_LIFE_FIGURES_URL);
+    return Array.isArray(value)
+      ? value.filter((item): item is AmiiboLifeFigure => typeof item === "object" && item !== null)
+      : [];
+  } catch (error) {
+    log.warn(`Failed to load amiibo.life figure catalogue: ${(error as Error).message}`);
+    return [];
+  }
 }
 
 /** Read amiibo.json from the local filesystem. Node-only — used by the CLI
@@ -139,13 +291,19 @@ export async function loadAllDatasets(
   const amiiboLoader = options.amiiboDatabasePath
     ? loadAmiiboDatabaseFromFile(options.amiiboDatabasePath)
     : loadAmiiboDatabase();
-  const [amiibo, switchIndices, ds] = await Promise.all([
+  const [amiibo, switchIndices, ds, amiiboLifeFigures] = await Promise.all([
     amiiboLoader,
     loadSwitchTitleDb(),
     loadDSDatabase(),
+    loadAmiiboLifeFigures(),
   ]);
+  const amiiboLifeUrls = buildAmiiboLifeUrlIndex(amiibo, amiiboLifeFigures);
+  log.info(
+    `amiibo.life canonical URLs: matched=${amiiboLifeUrls.size}/${Object.keys(amiibo.amiibos).length}`,
+  );
   return {
     amiibo,
+    amiiboLifeUrls,
     switchIndex: switchIndices.switchIndex,
     switch2Index: switchIndices.switch2Index,
     wiiu: loadWiiUDataset(),

@@ -98,25 +98,25 @@ export function parseAmiiboPage(
       case "switch": {
         const result = resolveSwitch(sanitized, gameName, options.datasets);
         if (result.missing) missing.push(`${gameName} (Switch)`);
-        else games.gamesSwitch.push({ ...baseGame, gameID: result.ids });
+        games.gamesSwitch.push({ ...baseGame, gameID: result.ids });
         break;
       }
       case "switch 2": {
         const result = resolveSwitch2(sanitized, gameName, options.datasets);
         if (result.missing) missing.push(`${gameName} (Switch2)`);
-        else games.gamesSwitch2.push({ ...baseGame, gameID: result.ids });
+        games.gamesSwitch2.push({ ...baseGame, gameID: result.ids });
         break;
       }
       case "wii u": {
         const result = resolveWiiU(gameName, options.datasets);
         if (result.missing) missing.push(`${gameName} (Wii U)`);
-        else games.gamesWiiU.push({ ...baseGame, gameID: result.ids });
+        games.gamesWiiU.push({ ...baseGame, gameID: result.ids });
         break;
       }
       case "3ds": {
         const result = resolve3DS(gameName, options.datasets);
         if (result.missing) missing.push(`${gameName} (3DS)`);
-        else games.games3DS.push({ ...baseGame, gameID: result.ids });
+        games.games3DS.push({ ...baseGame, gameID: result.ids });
         break;
       }
       default:

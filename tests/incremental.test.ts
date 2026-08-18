@@ -37,6 +37,7 @@ function database(entries: Record<string, { name: string }>): AmiiboDatabaseRaw 
 function datasets(amiibo: AmiiboDatabaseRaw) {
   return {
     amiibo,
+    amiiboLifeUrls: new Map(),
     switchIndex: new Map(),
     switch2Index: new Map(),
     wiiu: [],
@@ -57,8 +58,22 @@ test("incremental plan reuses unchanged previous entries and processes changed o
   });
   const previousGames: AmiiboKeyValue = {
     amiibos: {
-      [unchangedId]: emptyGames(),
-      [changedId]: emptyGames(),
+      [unchangedId]: {
+        ...emptyGames(),
+        gamesSwitch: [{
+          gameName: "Super Mario Party",
+          gameID: ["010036B0034E4000"],
+          amiiboUsage: [{ Usage: "Receive a bonus", write: false }],
+        }],
+      },
+      [changedId]: {
+        ...emptyGames(),
+        gamesSwitch: [{
+          gameName: "The Legend of Zelda",
+          gameID: ["01007EF00011E000"],
+          amiiboUsage: [{ Usage: "Receive an item", write: false }],
+        }],
+      },
     },
   };
 
@@ -70,6 +85,23 @@ test("incremental plan reuses unchanged previous entries and processes changed o
   assert.deepEqual(plan.reusedIds, [unchangedId]);
   assert.deepEqual(plan.processIds, [changedId]);
   assert.equal(plan.forceFullReason, null);
+});
+
+test("incremental plan retries previous entries without usage", () => {
+  const emptyId = "0x0000000000000000";
+  const previousAmiibo = database({ [emptyId]: { name: "Mario" } });
+  const currentAmiibo = database({ [emptyId]: { name: "Mario" } });
+  const previousGames: AmiiboKeyValue = {
+    amiibos: { [emptyId]: emptyGames() },
+  };
+
+  const plan = buildIncrementalPlan(datasets(currentAmiibo), {
+    previousAmiibo,
+    previousGames,
+  });
+
+  assert.deepEqual(plan.processIds, [emptyId]);
+  assert.deepEqual(plan.reusedIds, []);
 });
 
 test("incremental generation merges reused previous games with processed changes", async () => {
@@ -84,7 +116,11 @@ test("incremental generation merges reused previous games with processed changes
   });
   const reusedGames: Games = {
     ...emptyGames(),
-    gamesSwitch: [{ gameName: "Mario Kart 8 Deluxe", gameID: ["0100152000022000"], amiiboUsage: [] }],
+    gamesSwitch: [{
+      gameName: "Mario Kart 8 Deluxe",
+      gameID: ["0100152000022000"],
+      amiiboUsage: [{ Usage: "Unlock a racing suit", write: false }],
+    }],
   };
   const processedGames: Games = {
     ...emptyGames(),
