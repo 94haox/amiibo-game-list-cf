@@ -50,3 +50,32 @@ test("parser preserves usage when a title ID cannot be resolved", () => {
     },
   ]);
 });
+
+for (const [label, platform] of [
+  ["Switch", "gamesSwitch"],
+  ["Switch 2", "gamesSwitch2"],
+  ["Wii U", "gamesWiiU"],
+  ["3DS", "games3DS"],
+] as const) {
+  test(`parser reads ${label} from the current game card system label`, () => {
+    const result = parseAmiiboPage(`
+      <div class="games panel">
+        <a href="/games/example">
+          <div class="game-card-details">
+            <span class="system label">${label}</span>
+            <p class="name">Example Game</p>
+            <ul class="features">
+              <li>Unlock a bonus costume <em>(Read+Write)</em></li>
+            </ul>
+          </div>
+        </a>
+      </div>
+    `, { amiiboName: "Example Amiibo", datasets });
+
+    assert.deepEqual(result.games[platform], [{
+      gameName: "Example Game",
+      gameID: [],
+      amiiboUsage: [{ Usage: "Unlock a bonus costume", write: true }],
+    }]);
+  });
+}

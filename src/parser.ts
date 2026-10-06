@@ -76,7 +76,7 @@ export function parseAmiiboPage(
 
   for (const anchor of anchors) {
     const nameNode = anchor.querySelector(".name");
-    const platformNode = nameNode?.querySelector("span");
+    const platformNode = anchor.querySelector(".system") ?? nameNode?.querySelector("span");
     let gameName = normalizeGameName(directTextOf(nameNode));
 
     if (options.amiiboName === "Shadow Mewtwo") {

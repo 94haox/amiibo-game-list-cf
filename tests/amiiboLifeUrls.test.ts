@@ -21,6 +21,20 @@ const database: AmiiboDatabaseRaw = {
   types: {},
 };
 
+for (const [id, name, expected] of [
+  ["0x010d000004a70902", "Mineru", "https://amiibo.life/amiibo/the-legend-of-zelda/mineru-s-construct"],
+  ["0x1f04000004ca1e03", "Chef Kawasaki", "https://amiibo.life/amiibo/kirby-air-riders/chef-kawasaki-hop-star"],
+] as const) {
+  test(`verified URL override resolves ${name} independently of catalogue matches`, async () => {
+    const ctx = buildAmiiboContext(database, id, { name });
+    assert.equal(await buildAmiiboUrl(ctx), expected);
+    assert.equal(
+      await buildAmiiboUrl(ctx, "https://amiibo.life/amiibo/incorrect/catalogue-match"),
+      expected,
+    );
+  });
+}
+
 test("canonical URL index resolves variant names and series aliases", () => {
   const urls = buildAmiiboLifeUrlIndex(database, [
     {
