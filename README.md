@@ -133,6 +133,34 @@ reuses unchanged entries from the previous games info file, and only fetches
 amiibo.life pages for new or changed amiibo. Use `--force-full` to bypass reuse
 when parser logic or title-id resources change.
 
+### CLI request pacing
+
+The CLI starts at most one amiibo.life request every 2 seconds across catalogue,
+search, detail and retry requests. `--request-interval-ms` accepts a positive
+integer to tune this interval; `--concurrency` still controls the number of
+amiibo being processed. Other data hosts keep their existing request behavior.
+
+A 429 pauses the shared amiibo.life queue. The client honors `Retry-After`
+(seconds or HTTP date), or waits 60, 120, 240 seconds and so on, capped at
+15 minutes, with up to 1 second of jitter. A successful response resets the
+fallback backoff. Already running requests can finish; waiting requests recheck
+the cooldown before starting and retries pass through the same pacing queue.
+Five unsuccessful attempts still fail generation and preserve existing output
+files. 403 and 404 responses fail immediately.
+
+Default GETs for the same URL share in-flight work and successful text responses
+within one CLI invocation. The successful-response cache is bounded to an
+estimated 32 MiB of string storage and evicts the least recently used entries.
+Failures are evicted immediately. Each new CLI run starts with a fresh cache,
+including full refreshes. This does not provide checkpoint/resume support.
+
+The standalone generation workflow has a 120-minute timeout and serializes its
+runs. Downstream workflows passing `--request-interval-ms` must use a generator
+revision containing this option; merge the generator change before the matching
+`boon_hono` workflow change. Locks and cooldowns are local to a repository/run;
+they do not coordinate separate repositories or Cloudflare isolates. Worker
+entry points retain their existing scheduling and do not enable the CLI cache.
+
 The `nodejs_compat` flag is required for `fast-xml-parser`'s buffer usage.
 
 ## Known constraints

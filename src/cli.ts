@@ -11,6 +11,7 @@ import { dirname } from "node:path";
 import process from "node:process";
 
 import { log, setLevel, type Level } from "./log.js";
+import { configureAmiiboLifeRequests } from "./fetch-retry.js";
 import { runFullGeneration } from "./pipeline.js";
 import type { AmiiboDatabaseRaw, AmiiboKeyValue } from "./types.js";
 
@@ -21,6 +22,7 @@ interface CliOptions {
   previousAmiibo: string | null;
   previousGamesInfo: string | null;
   concurrency: number;
+  requestIntervalMs: number;
   limit: number | null;
   allowMissing: boolean;
   incremental: boolean;
@@ -36,6 +38,7 @@ function parseArgs(argv: string[]): CliOptions {
     previousAmiibo: null,
     previousGamesInfo: null,
     concurrency: 8,
+    requestIntervalMs: 2000,
     limit: null,
     allowMissing: false,
     incremental: false,
@@ -87,6 +90,12 @@ function parseArgs(argv: string[]): CliOptions {
           throw new Error(`Invalid limit: ${opts.limit}`);
         }
         break;
+      case "--request-interval-ms":
+        opts.requestIntervalMs = Number(next());
+        if (!Number.isSafeInteger(opts.requestIntervalMs) || opts.requestIntervalMs < 1) {
+          throw new Error(`Invalid request interval: ${opts.requestIntervalMs}`);
+        }
+        break;
       case "--allow-missing":
         opts.allowMissing = true;
         break;
@@ -119,6 +128,8 @@ function printHelp(): void {
                             previous games_info.json to merge reused entries
       --force-full          process all amiibo even when previous files exist
   -p, --concurrency <n>     parallel fetchers (default: 8)
+      --request-interval-ms <n>
+                            minimum interval between amiibo.life requests (default: 2000)
       --limit <n>           process only first N amiibo (for smoke tests)
       --allow-missing       exit 0 even if some titleids couldn't be matched
                             (default: exit 1 to surface gaps)
@@ -142,6 +153,8 @@ async function readJson<T>(path: string | null): Promise<T | null> {
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   setLevel(opts.logLevel);
+  configureAmiiboLifeRequests(opts.requestIntervalMs);
+  log.info(`amiibo.life request interval: ${opts.requestIntervalMs}ms; shared cooldown and per-run cache enabled`);
   const [previousAmiibo, previousGames] = await Promise.all([
     readJson<AmiiboDatabaseRaw>(opts.previousAmiibo),
     readJson<AmiiboKeyValue>(opts.previousGamesInfo),
