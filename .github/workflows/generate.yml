@@ -27,11 +27,15 @@ on:
     # Mirror the cron in wrangler.toml — weekly, Monday 04:00 UTC.
     - cron: "0 4 * * 1"
 
+concurrency:
+  group: generate-games-info
+  cancel-in-progress: false
+
 jobs:
   generate:
     name: Run generator
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     permissions:
       contents: read
 
@@ -53,6 +57,7 @@ jobs:
           set +e
           ARGS="--output games_info.json --missing missing_games.json"
           ARGS="$ARGS --concurrency ${{ inputs.concurrency || '8' }}"
+          ARGS="$ARGS --request-interval-ms 2000"
           ARGS="$ARGS --log ${{ inputs.log_level || 'info' }}"
           if [ -n "${{ inputs.limit }}" ]; then
             ARGS="$ARGS --limit ${{ inputs.limit }}"
