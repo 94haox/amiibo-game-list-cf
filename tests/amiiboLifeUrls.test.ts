@@ -24,6 +24,8 @@ const database: AmiiboDatabaseRaw = {
 for (const [id, name, expected] of [
   ["0x010d000004a70902", "Mineru", "https://amiibo.life/amiibo/the-legend-of-zelda/mineru-s-construct"],
   ["0x1f04000004ca1e03", "Chef Kawasaki", "https://amiibo.life/amiibo/kirby-air-riders/chef-kawasaki-hop-star"],
+  ["0x0000000404431c02", "Mario (Melody Car)", "https://amiibo.life/amiibo/my-mario-wood-blocks/mario-melody-car"],
+  ["0x000a000404451c02", "Toad", "https://amiibo.life/amiibo/my-mario-wood-blocks/toad"],
 ] as const) {
   test(`verified URL override resolves ${name} independently of catalogue matches`, async () => {
     const ctx = buildAmiiboContext(database, id, { name });
@@ -34,6 +36,44 @@ for (const [id, name, expected] of [
     );
   });
 }
+
+test("wood block series aliases disambiguate characters shared with other series", () => {
+  const blockDatabase: AmiiboDatabaseRaw = {
+    ...database,
+    amiibo_series: { "0x1c": "My Mario Wooden Blocks" },
+    amiibos: {
+      "0x000a000404451c02": { name: "Toad" },
+      "0x0000000404431c02": { name: "Mario (Melody Car)" },
+      "0x00000004043f1c02": { name: "Mario" },
+    },
+  };
+  const urls = buildAmiiboLifeUrlIndex(blockDatabase, [
+    { name: "Toad", series_name: "Super Mario", url: "/amiibo/super-mario/toad" },
+    { name: "Mario", series_name: "Super Mario", url: "/amiibo/super-mario/mario" },
+    { name: "Toad", series_name: "My Mario Wood Blocks", url: "/amiibo/my-mario-wood-blocks/toad" },
+    { name: "Mario", series_name: "My Mario Wood Blocks", url: "/amiibo/my-mario-wood-blocks/mario" },
+    {
+      name: "Mario (Melody Car)",
+      series_name: "My Mario Wood Blocks",
+      url: "/amiibo/my-mario-wood-blocks/mario-melody-car",
+    },
+  ]);
+
+  assert.equal(urls.get("0x000a000404451c02"), "https://amiibo.life/amiibo/my-mario-wood-blocks/toad");
+  assert.equal(urls.get("0x0000000404431c02"), "https://amiibo.life/amiibo/my-mario-wood-blocks/mario-melody-car");
+  assert.equal(urls.get("0x00000004043f1c02"), "https://amiibo.life/amiibo/my-mario-wood-blocks/mario");
+});
+
+test("wood block fallback URLs preserve redundant series suffix cleanup", async () => {
+  const blockDatabase: AmiiboDatabaseRaw = {
+    ...database,
+    amiibo_series: { "0x1c": "My Mario Wooden Blocks" },
+  };
+  const ctx = buildAmiiboContext(blockDatabase, "0x0001000404401c02", {
+    name: "Luigi - My Mario Wooden Blocks",
+  });
+  assert.equal(await buildAmiiboUrl(ctx), "https://amiibo.life/amiibo/my-mario-wood-blocks/luigi");
+});
 
 test("canonical URL index resolves variant names and series aliases", () => {
   const urls = buildAmiiboLifeUrlIndex(database, [
