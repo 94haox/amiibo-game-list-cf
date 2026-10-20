@@ -81,7 +81,7 @@ function normalizeAmiiboName(value: string): string {
 }
 
 function normalizeSeriesName(value: string): string {
-  return value
+  const normalized = value
     .normalize("NFKD")
     .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
@@ -90,6 +90,7 @@ function normalizeSeriesName(value: string): string {
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  return normalized === "my mario wooden blocks" ? "my mario wood blocks" : normalized;
 }
 
 function removeSplatoonToken(value: string): string {

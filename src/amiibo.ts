@@ -255,6 +255,8 @@ const AMIIBO_LIFE_URL_OVERRIDES: Record<string, string> = {
 };
 
 const AMIIBO_LIFE_URL_OVERRIDES_BY_ID: Record<string, string> = {
+  "0x0000000404431c02": "https://amiibo.life/amiibo/my-mario-wood-blocks/mario-melody-car",
+  "0x000a000404451c02": "https://amiibo.life/amiibo/my-mario-wood-blocks/toad",
   "0x0000000002380602": "https://amiibo.life/amiibo/super-mario-bros-30th-anniversary/mario-classic-colors",
   "0x0000000002390602": "https://amiibo.life/amiibo/super-mario-bros-30th-anniversary/mario-modern-colors",
   "0x00080100042f1a02": "https://amiibo.life/amiibo/donkey-kong/donkey-kong-pauline",
@@ -410,6 +412,9 @@ export async function buildAmiiboUrl(
   if (canonicalUrl) return canonicalUrl;
 
   let seriesSlug = series.toLowerCase().replace(/[!.]/g, "").replace(/[' ]/g, "-");
+  if (seriesSlug === "my-mario-wooden-blocks") {
+    seriesSlug = "my-mario-wood-blocks";
+  }
 
   switch (name.toLowerCase()) {
     case "super mario cereal":
