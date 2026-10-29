@@ -1,5 +1,4 @@
-// Parses an amiibo.life amiibo page into a Games record. Replicates the
-// XPath logic in Program.ParseAmiibo using node-html-parser's CSS selectors.
+// Parses current and legacy amiibo.life game cards into a Games record.
 
 import { parse, type HTMLElement } from "node-html-parser";
 
@@ -36,15 +35,10 @@ function parseUsages(node: HTMLElement): AmiiboUsage[] {
   const items = node.querySelectorAll(".features li");
   const usages: AmiiboUsage[] = items.map((li) => {
     const em = li.querySelector("em");
-    // GetDirectInnerText: text content excluding child element text.
-    const direct = li.childNodes
-      .filter((n) => n.nodeType === 3 /* TEXT_NODE */)
-      .map((n) => n.rawText)
-      .join("")
-      .trim();
+    const featureName = li.querySelector(".feature-link-name");
     return {
-      Usage: htmlDecode(direct),
-      write: em?.innerText.trim() === "(Read+Write)",
+      Usage: featureName ? htmlDecode(featureName.innerText).trim() : directTextOf(li),
+      write: li.querySelector(".type-read-write") !== null || em?.innerText.trim() === "(Read+Write)",
     };
   });
   usages.sort((a, b) => a.Usage.localeCompare(b.Usage, undefined, { sensitivity: "base" }));
@@ -65,19 +59,35 @@ export function parseAmiiboPage(
   html: string,
   options: { amiiboName: string; datasets: BaseDatasets },
 ): ParsedAmiibo {
-  const root = parse(htmlDecode(html));
+  const root = parse(html);
   const games = emptyGames();
   const missing: string[] = [];
 
-  const anchors = root.querySelectorAll(".games.panel > a");
-  if (anchors.length === 0) {
+  const panel = root.querySelector(".games.panel");
+  if (!panel) {
+    throw new Error(`Unrecognized amiibo.life page for ${options.amiiboName}: missing games panel`);
+  }
+
+  const cards = root.querySelectorAll(".games.panel > a, .games.panel > .game-card");
+  if (cards.length === 0) {
+    if (
+      Number(panel.querySelector("strong")?.innerText) > 0 ||
+      panel.querySelector('.game-card, .features, a[href^="/games/"]')
+    ) {
+      throw new Error(`Unrecognized amiibo.life game layout for ${options.amiiboName}`);
+    }
     return { games, missing };
   }
 
-  for (const anchor of anchors) {
-    const nameNode = anchor.querySelector(".name");
-    const platformNode = anchor.querySelector(".system") ?? nameNode?.querySelector("span");
-    let gameName = normalizeGameName(directTextOf(nameNode));
+  for (const card of cards) {
+    const nameNode = card.querySelector(".name");
+    const nameLink = nameNode?.querySelector("a");
+    const platformNode = card.querySelector(".system") ?? nameNode?.querySelector("span");
+    let gameName = normalizeGameName(nameLink ? htmlDecode(nameLink.innerText) : directTextOf(nameNode));
+
+    if (!gameName || !platformNode?.innerText.trim()) {
+      throw new Error(`Unrecognized amiibo.life game card for ${options.amiiboName}: missing name or platform`);
+    }
 
     if (options.amiiboName === "Shadow Mewtwo") {
       gameName = "Pokkén Tournament";
@@ -86,7 +96,10 @@ export function parseAmiiboPage(
     const sanitized = sanitizeGameName(gameName);
     const platform = platformNode?.innerText.trim().toLowerCase();
 
-    const usages = parseUsages(anchor);
+    const usages = parseUsages(card);
+    if (usages.length === 0 || usages.some((usage) => !usage.Usage)) {
+      throw new Error(`Unrecognized amiibo.life usage for ${options.amiiboName} in ${gameName}`);
+    }
 
     const baseGame: Game = {
       gameName,
